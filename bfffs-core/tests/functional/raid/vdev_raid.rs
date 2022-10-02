@@ -113,18 +113,32 @@ mod errors {
         gnops: Vec<Gnop>
     }
 
+    impl Harness {
+        async fn reset(&mut self) {
+            let mirrors = self.gnops.iter()
+                .map(|gnop| {
+                    Mirror::create(&[gnop.as_path()], None).unwrap()
+                }).collect::<Vec<_>>();
+            let cs = NonZeroU64::new(self.config.chunksize);
+            let vdev = Arc::new(VdevRaid::create(cs, self.config.k,
+                                                 self.config.f, mirrors));
+            vdev.open_zone(0).await.unwrap();
+            self.vdev = vdev;
+        }
+    }
+
     async fn harness(config: Config) -> Harness {
         let tempdir = Builder::new()
             .prefix("vdev_raid::errors")
             .tempdir()
             .unwrap();
+        let cs = NonZeroU64::new(config.chunksize);
         let gnops = (0..config.n).map(|_| Gnop::new().unwrap())
             .collect::<Vec<_>>();
         let mirrors = gnops.iter()
             .map(|gnop| {
                 Mirror::create(&[gnop.as_path()], None).unwrap()
             }).collect::<Vec<_>>();
-        let cs = NonZeroU64::new(config.chunksize);
         let vdev = Arc::new(VdevRaid::create(cs, config.k, config.f, mirrors));
         vdev.open_zone(0).await.unwrap();
         Harness { vdev, _tempdir: tempdir, config, gnops}
@@ -154,27 +168,32 @@ mod errors {
     /// Use gnop to inject read errors in leaf vdevs, and verify that VdevRaid
     /// can cope
     // TODO: multiple disk failures
-    // TODO: failures on arbitrary disks
     // TODO: verify that one stripe is enough to cause every disk to get read
+    // TODO: errors when reading from multiple stripes, because the code is
+    // different than when reading from one.
     #[named]
     #[apply(error_configs)]
     #[rstest]
     #[tokio::test]
     async fn read_at(c: Config) {
         require_root!();
-        let h = harness(c).await;
-        let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
-        let wbuf0 = dbsw.try_const().unwrap();
-        let wbuf1 = dbsw.try_const().unwrap();
-        let rbuf = dbsr.try_mut().unwrap();
+        let mut h = harness(c).await;
+        for i in 0..(c.n as usize) {
+            if i > 0 {
+                h.gnops[i - 1].error_prob(0);
+                h.reset().await;
+            }
+            let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+            let wbuf0 = dbsw.try_const().unwrap();
+            let wbuf1 = dbsw.try_const().unwrap();
+            let rbuf = dbsr.try_mut().unwrap();
 
-        let zl = h.vdev.zone_limits(0);
-        //write_read(h.vdev, &[wbuf0], &mut [&mut rbuf0], 0, zl.0)
-        h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
-        // TODO: inject errors
-        h.gnops[0].error_prob(100);
-        h.vdev.read_at(rbuf, zl.0).await.unwrap();
-        assert_eq!(wbuf1, dbsr.try_const().unwrap());
+            let zl = h.vdev.zone_limits(0);
+            h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
+            h.gnops[i].error_prob(100);
+            h.vdev.clone().read_at(rbuf, zl.0).await.unwrap();
+            assert_eq!(wbuf1, dbsr.try_const().unwrap());
+        }
     }
 
 }

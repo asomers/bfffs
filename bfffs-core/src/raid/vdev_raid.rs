@@ -8,11 +8,14 @@ use crate::{
     vdev::*,
 };
 use divbuf::{DivBuf, DivBufShared};
+use fixedbitset::FixedBitSet;
 use futures::{
+    FutureExt,
+    StreamExt,
     TryFutureExt,
     TryStreamExt,
     future,
-    stream::FuturesUnordered
+    stream::{FuturesOrdered, FuturesUnordered},
 };
 use itertools::multizip;
 use mockall_double::double;
@@ -239,9 +242,8 @@ macro_rules! issue_1stripe_ops {
                     loc.offset * $self.chunksize
                 };
                 $self.mirrors[loc.disk as usize].$func(d, disk_lba)
-            }).collect::<FuturesUnordered<_>>()
-            .try_collect::<Vec<_>>()
-            .map_ok(drop)
+            }).collect::<FuturesOrdered<_>>()
+            .collect::<Vec<Result<()>>>()
         }
     }
 }
@@ -471,7 +473,9 @@ impl VdevRaid {
     fn read_at_one(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> BoxVdevFut {
         let col_len = self.chunksize as usize * BYTES_PER_LBA;
         let f = self.codec.protection() as usize;
-        let m = self.codec.stripesize() as usize - f;
+        let m = self.codec.stripesize() as usize;
+        let k = m - f;
+        let dbi = buf.clone_inaccessible();
 
         let data: Vec<IoVecMut> = if lba % self.chunksize == 0 {
             buf.into_chunks(col_len).collect()
@@ -486,11 +490,74 @@ impl VdevRaid {
         };
         debug_assert!(data.len() <= m);
 
-        let fut = issue_1stripe_ops!(self, data, lba, false, read_at);
+        let fut = issue_1stripe_ops!(self, data, lba, false, read_at)
+        .then(move |dv| {
+            if dv.iter().all(Result::is_ok) {
+                Box::pin(future::ok(())) as BoxVdevFut
+            } else if dv.iter().filter(|r| r.is_err()).count() > f {
+                // Too many errors :(
+                // TODO: add a test case for this.  No recovery should be
+                // attempted if too many data disks failed.
+                let r = dv.iter().find(|r| r.is_err()).unwrap();
+                Box::pin(future::err(r.unwrap_err())) as BoxVdevFut
+            } else {
+                let mut pbufs = (0..f)
+                    .map(|_| DivBufShared::uninitialized(col_len))
+                    .collect::<Vec<_>>();
+                let pmuts = pbufs.iter_mut()
+                    .map(|dbs| dbs.try_mut().unwrap())
+                    .collect::<Vec<_>>();
+                let fut = issue_1stripe_ops!(self, pmuts, lba, true, read_at)
+                .map(move |pv| {
+                    let mut surviving = Vec::with_capacity(k);
+                    let mut missing = Vec::with_capacity(f);
+                    let mut erasures = FixedBitSet::with_capacity(m);
+                    let mut container = Vec::with_capacity(k);
+                    let data = dbi.try_mut().unwrap();
+                    let mut pcols = pbufs.into_iter()
+                        .map(|dbs| dbs.try_mut().unwrap());
+                    let mut chunks = data.into_chunks(col_len)
+                        .chain(pcols);
+                    for i in 0..m {
+                        let r = if i < k {
+                            &dv[i]
+                        } else {
+                            &pv[i - k]
+                        };
+                        let mut col = chunks.next().unwrap();
+                        if r.is_ok() {
+                            surviving.push(col.as_ptr());
+                        } else {
+                            missing.push(col.as_mut_ptr());
+                            erasures.set(i, true);
+                        }
+                        container.push(col);
+                        if surviving.len() >= k {
+                            break;
+                        }
+                    }
+                    if surviving.len() >= k {
+                        // Safe because all columns are held in `container` and
+                        // they all have the same length.
+                        unsafe {
+                            self.codec.decode(col_len, &surviving, &mut missing,
+                                              &erasures);
+                        }
+                        Ok(())
+                        // TODO: re-write the offending sector for READ UNRECOVERABLE
+                    } else {
+                        let r = dv.iter().find(|r| r.is_err()).unwrap();
+                        Err(r.unwrap_err())
+                    }
+                    // TODO: record error statistics
+                });
+                Box::pin(fut) as BoxVdevFut
+            }
+        });
+        Box::pin(fut)
         // TODO: on error, record error statistics, possibly fault a drive,
         // request the faulty drive's zone to be rebuilt, and read parity to
         // reconstruct the data.
-        Box::pin(fut)
     }
 
     /// Write two or more whole stripes
@@ -620,12 +687,16 @@ impl VdevRaid {
 
         let data_fut = issue_1stripe_ops!(self, dcols, lba, false, write_at);
         let parity_fut = issue_1stripe_ops!(self, pw, lba, true, write_at);
-        // TODO: on error, some futures get cancelled.  Figure out how to clean
-        // them up.
         // TODO: on error, record error statistics, and possibly fault a drive.
         Box::pin(
-            future::try_join(data_fut, parity_fut)
-            .map_ok(drop)
+            future::join(data_fut, parity_fut)
+            .map(|(dv, pv)|
+                 dv.iter()
+                 .chain(pv.iter())
+                 .find(|r| r.is_err())
+                 .cloned()
+                 .unwrap_or(Ok(()))
+            )
         )
     }
 
@@ -678,8 +749,14 @@ impl VdevRaid {
         let parity_fut = issue_1stripe_ops!(self, pw, lba, true, write_at);
         // TODO: on error, record error statistics, and possibly fault a drive.
         Box::pin(
-            future::try_join(data_fut, parity_fut)
-            .map_ok(drop)
+            future::join(data_fut, parity_fut)
+            .map(|(dv, pv)|
+                 dv.iter()
+                 .chain(pv.iter())
+                 .find(|r| r.is_err())
+                 .cloned()
+                 .unwrap_or(Ok(()))
+            )
         )
     }
 }
