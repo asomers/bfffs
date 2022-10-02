@@ -1,7 +1,27 @@
 // vim: tw=80
-use bfffs_core::{mirror::Mirror, raid::VdevRaid};
 use std::{fs, path::PathBuf};
+
+use divbuf::DivBufShared;
+use rand::{Rng, thread_rng};
 use tempfile::Builder;
+
+use bfffs_core::{*, mirror::Mirror, raid::VdevRaid};
+
+fn make_bufs(chunksize: LbaT, k: i16, f: i16, s: usize) ->
+    (DivBufShared, DivBufShared)
+{
+    let chunks = s * (k - f) as usize;
+    let lbas = chunksize * chunks as LbaT;
+    let bytes = BYTES_PER_LBA * lbas as usize;
+    let mut wvec = vec![0u8; bytes];
+    let mut rng = thread_rng();
+    for x in &mut wvec {
+        *x = rng.gen();
+    }
+    let dbsw = DivBufShared::from(wvec);
+    let dbsr = DivBufShared::from(vec![0u8; bytes]);
+    (dbsw, dbsr)
+}
 
 #[test]
 #[should_panic]
@@ -45,9 +65,8 @@ fn create_stripesize_too_big() {
     VdevRaid::create(None, stripesize, redundancy, mirrors);
 }
 
-/// These tests use real VdevBlock and VdevLeaf objects
-mod vdev_raid {
-
+/// Tests related to fault-tolerance
+mod errors {
     use bfffs_core::{
         *,
         mirror::Mirror,
@@ -55,6 +74,7 @@ mod vdev_raid {
         vdev::Vdev,
     };
     use divbuf::DivBufShared;
+    use function_name::named;
     use futures::{
         FutureExt,
         TryFutureExt,
@@ -71,6 +91,122 @@ mod vdev_raid {
         path::PathBuf,
         sync::Arc
     };
+    use super::make_bufs;
+    use super::super::super::*;
+    use tempfile::{Builder, TempDir};
+
+    #[derive(Clone, Copy, Debug)]
+    struct Config {
+        n: i16,
+        k: i16,
+        f: i16,
+        chunksize: LbaT
+    }
+    fn config(n: i16, k: i16, f: i16, chunksize: LbaT) -> Config {
+        Config{n, k, f, chunksize}
+    }
+
+    struct Harness {
+        vdev: Arc<VdevRaid>,
+        _tempdir: TempDir,
+        config: Config,
+        gnops: Vec<Gnop>
+    }
+
+    async fn harness(config: Config) -> Harness {
+        let tempdir = Builder::new()
+            .prefix("vdev_raid::errors")
+            .tempdir()
+            .unwrap();
+        let gnops = (0..config.n).map(|_| Gnop::new().unwrap())
+            .collect::<Vec<_>>();
+        let mirrors = gnops.iter()
+            .map(|gnop| {
+                Mirror::create(&[gnop.as_path()], None).unwrap()
+            }).collect::<Vec<_>>();
+        let cs = NonZeroU64::new(config.chunksize);
+        let vdev = Arc::new(VdevRaid::create(cs, config.k, config.f, mirrors));
+        vdev.open_zone(0).await.unwrap();
+        Harness { vdev, _tempdir: tempdir, config, gnops}
+    }
+
+    #[template]
+    #[rstest(c,
+             // Stupid mirror
+             case(config(2, 2, 1, 1)),
+             // Smallest possible PRIMES configuration
+             case(config(3, 3, 1, 2)),
+             // Smallest PRIMES declustered configuration
+             case(config(5, 4, 1, 2)),
+             // Smallest double-parity configuration
+             case(config(5, 5, 2, 2)),
+             // Smallest non-ideal PRIME-S configuration
+             case(config(7, 4, 1, 2)),
+             // Smallest triple-parity configuration
+             case(config(7, 7, 3, 2)),
+             // Smallest quad-parity configuration
+             case(config(11, 9, 4, 2)),
+     )]
+    // XXX Should be called "all_configs", but can't due to
+    // https://github.com/la10736/rstest/issues/124
+    fn error_configs(c: Config) {}
+
+    /// Use gnop to inject read errors in leaf vdevs, and verify that VdevRaid
+    /// can cope
+    // TODO: multiple disk failures
+    // TODO: failures on arbitrary disks
+    // TODO: verify that one stripe is enough to cause every disk to get read
+    #[named]
+    #[apply(error_configs)]
+    #[rstest]
+    #[tokio::test]
+    async fn read_at(c: Config) {
+        require_root!();
+        let h = harness(c).await;
+        let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+        let wbuf0 = dbsw.try_const().unwrap();
+        let wbuf1 = dbsw.try_const().unwrap();
+        let rbuf = dbsr.try_mut().unwrap();
+
+        let zl = h.vdev.zone_limits(0);
+        //write_read(h.vdev, &[wbuf0], &mut [&mut rbuf0], 0, zl.0)
+        h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
+        // TODO: inject errors
+        h.gnops[0].error_prob(100);
+        h.vdev.read_at(rbuf, zl.0).await.unwrap();
+        assert_eq!(wbuf1, dbsr.try_const().unwrap());
+    }
+
+}
+
+/// These tests use real VdevBlock and VdevLeaf objects
+mod vdev_raid {
+
+    use bfffs_core::{
+        *,
+        mirror::Mirror,
+        raid::*,
+        vdev::Vdev,
+    };
+    use divbuf::DivBufShared;
+    use function_name::named;
+    use futures::{
+        FutureExt,
+        TryFutureExt,
+        TryStreamExt,
+        stream::FuturesUnordered
+    };
+    use rand::{Rng, thread_rng};
+    use rstest::rstest;
+    use rstest_reuse::{apply, template};
+    use pretty_assertions::assert_eq;
+    use std::{
+        fs,
+        num::NonZeroU64,
+        path::PathBuf,
+        sync::Arc
+    };
+    use super::make_bufs;
     use super::super::super::*;
     use tempfile::{Builder, TempDir};
 
@@ -120,22 +256,6 @@ mod vdev_raid {
     // XXX Should be called "all_configs", but can't due to
     // https://github.com/la10736/rstest/issues/124
     fn raid_configs(h: Harness) {}
-
-    fn make_bufs(chunksize: LbaT, k: i16, f: i16, s: usize) ->
-        (DivBufShared, DivBufShared) {
-
-        let chunks = s * (k - f) as usize;
-        let lbas = chunksize * chunks as LbaT;
-        let bytes = BYTES_PER_LBA * lbas as usize;
-        let mut wvec = vec![0u8; bytes];
-        let mut rng = thread_rng();
-        for x in &mut wvec {
-            *x = rng.gen();
-        }
-        let dbsw = DivBufShared::from(wvec);
-        let dbsr = DivBufShared::from(vec![0u8; bytes]);
-        (dbsw, dbsr)
-    }
 
     async fn write_read(
         vr: Arc<VdevRaid>,
