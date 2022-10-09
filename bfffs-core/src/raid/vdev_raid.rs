@@ -514,7 +514,7 @@ impl VdevRaid {
                     let mut erasures = FixedBitSet::with_capacity(m);
                     let mut container = Vec::with_capacity(k);
                     let data = dbi.try_mut().unwrap();
-                    let mut pcols = pbufs.into_iter()
+                    let pcols = pbufs.into_iter()
                         .map(|dbs| dbs.try_mut().unwrap());
                     let mut chunks = data.into_chunks(col_len)
                         .chain(pcols);
@@ -527,8 +527,11 @@ impl VdevRaid {
                         let mut col = chunks.next().unwrap();
                         if r.is_ok() {
                             surviving.push(col.as_ptr());
-                        } else {
+                        } else if i < k {
                             missing.push(col.as_mut_ptr());
+                            erasures.set(i, true);
+                        } else {
+                            // Don't try to reconstruct missing parity columns
                             erasures.set(i, true);
                         }
                         container.push(col);

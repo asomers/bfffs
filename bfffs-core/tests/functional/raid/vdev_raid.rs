@@ -146,36 +146,45 @@ mod errors {
 
     #[template]
     #[rstest(c,
+             // Smallest double-parity configuration
+             case(config(5, 5, 2, 1)),
+             // Smallest triple-parity configuration
+             case(config(7, 7, 3, 1)),
+             // Smallest quad-parity configuration
+             case(config(11, 9, 4, 1)),
+     )]
+    fn double_failure_tolerant_configs(c: Config) {}
+
+    #[template]
+    #[rstest(c,
              // Stupid mirror
              case(config(2, 2, 1, 1)),
              // Smallest possible PRIMES configuration
-             case(config(3, 3, 1, 2)),
+             case(config(3, 3, 1, 1)),
              // Smallest PRIMES declustered configuration
-             case(config(5, 4, 1, 2)),
+             case(config(5, 4, 1, 1)),
              // Smallest double-parity configuration
-             case(config(5, 5, 2, 2)),
+             case(config(5, 5, 2, 1)),
              // Smallest non-ideal PRIME-S configuration
-             case(config(7, 4, 1, 2)),
+             case(config(7, 4, 1, 1)),
              // Smallest triple-parity configuration
-             case(config(7, 7, 3, 2)),
+             case(config(7, 7, 3, 1)),
              // Smallest quad-parity configuration
-             case(config(11, 9, 4, 2)),
+             case(config(11, 9, 4, 1)),
      )]
-    // XXX Should be called "all_configs", but can't due to
-    // https://github.com/la10736/rstest/issues/124
-    fn error_configs(c: Config) {}
+    fn single_failure_tolerant_configs(c: Config) {}
 
     /// Use gnop to inject read errors in leaf vdevs, and verify that VdevRaid
-    /// can cope
+    /// can cope.
     // TODO: multiple disk failures
     // TODO: verify that one stripe is enough to cause every disk to get read
     // TODO: errors when reading from multiple stripes, because the code is
     // different than when reading from one.
     #[named]
-    #[apply(error_configs)]
+    #[apply(single_failure_tolerant_configs)]
     #[rstest]
     #[tokio::test]
-    async fn read_at(c: Config) {
+    async fn read_at_single_failure(c: Config) {
         require_root!();
         let mut h = harness(c).await;
         for i in 0..(c.n as usize) {
@@ -192,10 +201,40 @@ mod errors {
             h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
             h.gnops[i].error_prob(100);
             h.vdev.clone().read_at(rbuf, zl.0).await.unwrap();
-            assert_eq!(wbuf1, dbsr.try_const().unwrap());
+            assert_eq!(&wbuf1[..], &dbsr.try_const().unwrap()[..]);
         }
     }
 
+    #[named]
+    #[apply(double_failure_tolerant_configs)]
+    #[rstest]
+    #[tokio::test]
+    async fn read_at_double_failure(c: Config) {
+        require_root!();
+        let mut h = harness(c).await;
+        for i in 0..(c.n as usize - 1) {
+            for j in (i + 1)..(c.n as usize) {
+                if i > 0 || j > 1 {
+                    h.reset().await;
+                }
+                let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+                let wbuf0 = dbsw.try_const().unwrap();
+                let wbuf1 = dbsw.try_const().unwrap();
+                let rbuf = dbsr.try_mut().unwrap();
+
+                let zl = h.vdev.zone_limits(0);
+                h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
+                h.gnops[i].error_prob(100);
+                h.gnops[j].error_prob(100);
+                h.vdev.clone().read_at(rbuf, zl.0).await.unwrap();
+                assert!(&wbuf1[..] == &dbsr.try_const().unwrap()[..],
+                    "miscompare!");
+
+                h.gnops[i].error_prob(0);
+                h.gnops[j].error_prob(0);
+            }
+        }
+    }
 }
 
 /// These tests use real VdevBlock and VdevLeaf objects
