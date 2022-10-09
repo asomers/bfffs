@@ -495,9 +495,7 @@ impl VdevRaid {
             if dv.iter().all(Result::is_ok) {
                 Box::pin(future::ok(())) as BoxVdevFut
             } else if dv.iter().filter(|r| r.is_err()).count() > f {
-                // Too many errors :(
-                // TODO: add a test case for this.  No recovery should be
-                // attempted if too many data disks failed.
+                // Too many errors.  No point in attempting recovery. :(
                 let r = dv.iter().find(|r| r.is_err()).unwrap();
                 Box::pin(future::err(r.unwrap_err())) as BoxVdevFut
             } else {
@@ -557,10 +555,10 @@ impl VdevRaid {
                 Box::pin(fut) as BoxVdevFut
             }
         });
-        Box::pin(fut)
         // TODO: on error, record error statistics, possibly fault a drive,
         // request the faulty drive's zone to be rebuilt, and read parity to
         // reconstruct the data.
+        Box::pin(fut)
     }
 
     /// Write two or more whole stripes
@@ -1880,6 +1878,81 @@ mod read_at {
         let rbuf = dbs.try_mut().unwrap();
         vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
         vdev_raid.read_at(rbuf, 131_072).now_or_never().unwrap().unwrap();
+    }
+
+    /// If too many data disks return EIO, then no error recovery is possible
+    /// and should not be attempted.
+    #[test]
+    fn supercritically_degraded() {
+        let k = 5;
+        let f = 1;
+        const CHUNKSIZE : LbaT = 1;
+
+        let mut mirrors = Vec::<Mirror>::new();
+
+        let mock = || {
+            let mut m = Mirror::default();
+            m.expect_size()
+                .return_const(262_144u64);
+            m.expect_open_zone()
+                .once()
+                .with(eq(65536))
+                .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+            m.expect_optimum_queue_depth()
+                .return_const(10u32);
+            m.expect_zone_limits()
+                .with(eq(0))
+                .return_const((1, 65536));
+            m.expect_zone_limits()
+                .with(eq(1))
+                .return_const((65536, 131_072));
+            m
+        };
+
+        let mut m0 = mock();
+        m0.expect_read_at()
+            .once()
+            .with(always(), eq(32768))
+            .return_once(|_, _|  Box::pin(future::err(Error::EIO)));
+        mirrors.push(m0);
+
+        let mut m1 = mock();
+        m1.expect_read_at()
+            .once()
+            .with(always(), eq(32768))
+            .return_once(|_, _|  Box::pin(future::err(Error::EIO)));
+        mirrors.push(m1);
+
+        let mut m2 = mock();
+        // No read here, because this is the parity disk for this stripe, and we
+        // won't attempt recovery.
+        m2.expect_read_at()
+            .never();
+        mirrors.push(m2);
+
+        let mut m3 = mock();
+        m3.expect_read_at()
+            .once()
+            .with(always(), eq(32768))
+            .return_once(|_, _|  Box::pin(future::ok(())));
+        mirrors.push(m3);
+
+        let mut m4 = mock();
+        m4.expect_read_at()
+            .once()
+            .with(always(), eq(32768))
+            .return_once(|_, _|  Box::pin(future::ok(())));
+        mirrors.push(m4);
+
+        let vdev_raid = Arc::new(
+            VdevRaid::new(CHUNKSIZE, k, f, Uuid::new_v4(),
+                          LayoutAlgorithm::PrimeS, mirrors.into_boxed_slice())
+        );
+        let dbs = DivBufShared::from(vec![0u8; 16384]);
+        let rbuf = dbs.try_mut().unwrap();
+        vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
+        let r = vdev_raid.read_at(rbuf, 131_072).now_or_never().unwrap();
+        assert_eq!(r, Err(Error::EIO));
     }
 }
 
