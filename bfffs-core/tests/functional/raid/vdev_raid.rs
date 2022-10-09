@@ -174,6 +174,15 @@ mod errors {
      )]
     fn single_failure_tolerant_configs(c: Config) {}
 
+    #[template]
+    #[rstest(c,
+             // Smallest triple-parity configuration
+             case(config(7, 7, 3, 1)),
+             // Smallest quad-parity configuration
+             case(config(11, 9, 4, 1)),
+     )]
+    fn triple_failure_tolerant_configs(c: Config) {}
+
     /// Use gnop to inject read errors in leaf vdevs, and verify that VdevRaid
     /// can cope.
     // TODO: multiple disk failures
@@ -232,6 +241,41 @@ mod errors {
 
                 h.gnops[i].error_prob(0);
                 h.gnops[j].error_prob(0);
+            }
+        }
+    }
+
+    #[named]
+    #[apply(triple_failure_tolerant_configs)]
+    #[rstest]
+    #[tokio::test]
+    async fn read_at_triple_failure(c: Config) {
+        require_root!();
+        let mut h = harness(c).await;
+        for i in 0..(c.n as usize - 2) {
+            for j in (i + 1)..(c.n as usize - 1) {
+                for l in (j + 1)..(c.n as usize) {
+                    if i > 0 || j > 1 || l > 2 {
+                        h.reset().await;
+                    }
+                    let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+                    let wbuf0 = dbsw.try_const().unwrap();
+                    let wbuf1 = dbsw.try_const().unwrap();
+                    let rbuf = dbsr.try_mut().unwrap();
+
+                    let zl = h.vdev.zone_limits(0);
+                    h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
+                    h.gnops[i].error_prob(100);
+                    h.gnops[j].error_prob(100);
+                    h.gnops[l].error_prob(100);
+                    h.vdev.clone().read_at(rbuf, zl.0).await.unwrap();
+                    assert!(&wbuf1[..] == &dbsr.try_const().unwrap()[..],
+                        "miscompare!");
+
+                    h.gnops[i].error_prob(0);
+                    h.gnops[j].error_prob(0);
+                    h.gnops[l].error_prob(0);
+                }
             }
         }
     }
