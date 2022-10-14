@@ -196,14 +196,30 @@ mod errors {
 
     /// Use gnop to inject read errors in leaf vdevs, and verify that VdevRaid
     /// can cope.
-    // TODO: verify that one stripe is enough to cause every disk to get read
-    // TODO: errors when reading from multiple stripes, because the code is
-    // different than when reading from one.
     #[named]
-    #[apply(single_failure_tolerant_configs)]
     #[rstest]
     #[tokio::test]
-    async fn read_at_single_failure(c: Config) {
+    async fn read_at_single_failure(
+        #[values(
+             // Stupid mirror
+             config(2, 2, 1, 1),
+             // Smallest possible PRIMES configuration
+             config(3, 3, 1, 1),
+             // Smallest PRIMES declustered configuration
+             config(5, 4, 1, 1),
+             // Smallest double-parity configuration
+             config(5, 5, 2, 1),
+             // Smallest non-ideal PRIME-S configuration
+             config(7, 4, 1, 1),
+             // Smallest triple-parity configuration
+             config(7, 7, 3, 1),
+             // Smallest quad-parity configuration
+             config(11, 9, 4, 1),
+        )]
+        c: Config,
+        #[values(1, 2)]
+        stripes: usize)
+    {
         require_root!();
         let mut h = harness(c).await;
         for i in 0..(c.n as usize) {
@@ -211,7 +227,7 @@ mod errors {
                 h.gnops[i - 1].error_prob(0);
                 h.reset().await;
             }
-            let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+            let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, stripes);
             let wbuf0 = dbsw.try_const().unwrap();
             let wbuf1 = dbsw.try_const().unwrap();
             let rbuf = dbsr.try_mut().unwrap();
@@ -282,7 +298,6 @@ mod errors {
                     }
                     let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
                     let wbuf0 = dbsw.try_const().unwrap();
-                    let wbuf1 = dbsw.try_const().unwrap();
                     let rbuf = dbsr.try_mut().unwrap();
 
                     let zl = h.vdev.zone_limits(0);
@@ -297,7 +312,7 @@ mod errors {
 
                     h.gnops[i].error_prob(0);
                     h.gnops[j].error_prob(0);
-                    if l >= 0 {
+                    if l > 0 {
                         h.gnops[l].error_prob(0);
                     }
                 }
