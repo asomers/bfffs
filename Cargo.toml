@@ -12,3 +12,4 @@ resolver = "2"
 
 [patch.crates-io]
 atomic_enum = { git = "https://github.com/asomers/atomic_enum.git", rev = "969354b" }
+nix = { path = "../nix" }

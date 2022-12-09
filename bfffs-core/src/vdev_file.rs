@@ -149,7 +149,9 @@ impl Vdev for VdevFile {
         self.size
     }
 
-    fn sync_all(&self) -> BoxVdevFut {
+    fn sync_all<'a>(&'a self) -> Pin<Box<dyn futures::Future<Output = Result<()>> + Send + Sync + 'a>>
+    //fn sync_all<'a>(&'a self) ->  impl Future<Output = Result<()>> + Send + Sync + 'a
+    {
         let fut = self.file.sync_all().unwrap()
             .map_ok(drop)
             .map_err(Error::from);
@@ -360,7 +362,8 @@ impl VdevFile {
     /// Asynchronously read a contiguous portion of the vdev.
     ///
     /// Return the number of bytes actually read.
-    pub fn read_at(&self, mut buf: IoVecMut, lba: LbaT) -> BoxVdevFut {
+    pub fn read_at<'a>(&'a self, mut buf: IoVecMut, lba: LbaT) -> impl Future<Output = Result<()>> + Send + Sync + 'a
+    {
         // Unlike write_at, the upper layers will never read into a buffer that
         // isn't a multiple of a block size.  DDML::read ensures that.
         debug_assert_eq!(buf.len() % BYTES_PER_LBA, 0);
@@ -373,7 +376,7 @@ impl VdevFile {
             mem::transmute::<&mut[u8], &'static mut [u8]>(buf.as_mut())
         };
         let fut = self.file.read_at(&mut *bufaddr, off).unwrap();
-        Box::pin(ReadAt { _buf: buf, fut })
+        ReadAt { _buf: buf, fut }
     }
 
     /// Read one of the spacemaps from disk.
@@ -382,7 +385,7 @@ impl VdevFile {
     /// - `buf`:        Place the still-serialized spacemap here.  `buf` will be
     ///                 resized as needed.
     /// * `lba`     LBA to read from
-    pub fn read_spacemap(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut
+    pub fn read_spacemap<'a>(&'a self, buf: IoVecMut, lba: LbaT) -> impl Future<Output = Result<()>> + Send + Sync + 'a
     {
         self.read_at(buf, lba)
     }
@@ -392,7 +395,7 @@ impl VdevFile {
     /// * `sglist   Scatter-gather list of buffers to receive data
     /// * `lba`     LBA to read from
     #[allow(clippy::transmute_ptr_to_ptr)]  // Clippy false positive
-    pub fn readv_at(&self, mut sglist: SGListMut, lba: LbaT) -> BoxVdevFut
+    pub fn readv_at(&'static self, mut sglist: SGListMut, lba: LbaT) -> BoxVdevFut
     {
         for iovec in sglist.iter() {
             debug_assert_eq!(iovec.len() % BYTES_PER_LBA, 0);
@@ -448,14 +451,14 @@ impl VdevFile {
     }
 
     /// Asynchronously write a contiguous portion of the vdev.
-    pub fn write_at(&self, buf: IoVec, lba: LbaT) -> BoxVdevFut
+    pub fn write_at(&'static self, buf: IoVec, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'static>>
     {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
         debug_assert_eq!(buf.len() % BYTES_PER_LBA, 0);
         self.write_at_unchecked(buf, lba)
     }
 
-    fn write_at_unchecked(&self, buf: IoVec, lba: LbaT) -> BoxVdevFut
+    fn write_at_unchecked(&'static self, buf: IoVec, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync>>
     {
         let off = lba * (BYTES_PER_LBA as u64);
         {
@@ -473,11 +476,29 @@ impl VdevFile {
         Box::pin(WriteAt { _buf: buf, fut })
     }
 
+    //fn write_at_unchecked2(&self, buf: IoVec, lba: LbaT) -> impl Future<Output = Result<()>> + Send + Sync
+    //{
+        //let off = lba * (BYTES_PER_LBA as u64);
+        //{
+            //let b: &[u8] = (*buf).borrow();
+            //debug_assert!(b.len() % BYTES_PER_LBA == 0);
+        //}
+
+        //// Safe because fut's lifetime is equal to buf's (or rather, it will
+        //// be once we move it into the WriteAt struct
+        //let sbuf: &'static [u8] = unsafe {
+            //mem::transmute::<&[u8], &'static [u8]>( buf.as_ref())
+        //};
+        //let fut = self.file.write_at(sbuf, off).unwrap();
+
+        //WriteAt { _buf: buf, fut }
+    //}
+
     /// Asynchronously write this Vdev's label.
     ///
     /// `label_writer` should already contain the serialized labels of every
     /// vdev stacked on top of this one.
-    pub fn write_label(&self, label_writer: LabelWriter) -> BoxVdevFut
+    pub fn write_label<'a>(&'a self, label_writer: LabelWriter) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>
     {
         let lba = label_writer.lba();
         let sglist = label_writer.into_sglist();
@@ -491,8 +512,8 @@ impl VdevFile {
     ///
     /// - `sglist`:     Buffers of data to write
     /// * `lba`     LBA to write to
-    pub fn write_spacemap(&self, sglist: SGList, lba: LbaT)
-        -> BoxVdevFut
+    pub fn write_spacemap<'a>(&'a self, sglist: SGList, lba: LbaT)
+        -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>
     {
         let bytes: u64 = sglist.iter()
             .map(DivBuf::len)
@@ -507,14 +528,14 @@ impl VdevFile {
     ///
     /// * `sglist`  Scatter-gather list of buffers to write
     /// * `lba`     LBA to write to
-    pub fn writev_at(&self, sglist: SGList, lba: LbaT) -> BoxVdevFut
+    pub fn writev_at<'a>(&'a self, sglist: SGList, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>
     {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
         self.writev_at_unchecked(sglist, lba)
     }
 
-    fn writev_at_unchecked(&self, sglist: SGList, lba: LbaT)
-        -> Pin<Box<WritevAt>>
+    fn writev_at_unchecked<'a>(&'a self, sglist: SGList, lba: LbaT)
+        -> Pin<Box<WritevAt<'a>>>
     {
         let off = lba * (BYTES_PER_LBA as u64);
 
@@ -542,14 +563,14 @@ impl VdevFile {
 }
 
 #[pin_project]
-struct ReadAt {
+struct ReadAt<'a> {
     // Owns the buffer used by the Future
     _buf: IoVecMut,
     #[pin]
-    fut: tokio_file::ReadAt<'static>
+    fut: tokio_file::ReadAt<'a>
 }
 
-impl Future for ReadAt {
+impl<'a> Future for ReadAt<'a> {
     type Output = Result<()>;
 
     // aio_write and friends will sometimes return an error synchronously (like
@@ -622,16 +643,16 @@ impl Future for ReadvAt {
 }
 
 #[pin_project]
-struct WritevAt{
+struct WritevAt<'a> {
     #[pin]
-    fut: tokio_file::WritevAt<'static>,
+    fut: tokio_file::WritevAt<'a>,
     // Owns the pointer array used by the Future
     _slices: Box<[IoSlice<'static>]>,
     // Owns the buffers used by the Future
     _sglist: SGList,
 }
 
-impl Future for WritevAt {
+impl<'a> Future for WritevAt<'a> {
     type Output = Result<()>;
 
     // aio_write and friends will sometimes return an error synchronously (like
