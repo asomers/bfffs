@@ -1047,11 +1047,14 @@ impl Fs {
         let db4 = database.clone();
         let (last_key, (atimep, _), (recsizep, _), _) =
         db4.fsread(tree_id, move |dataset| {
-            let last_key_fut = dataset.last_key();
+            let last_key_fut = dataset.last_key()
+                .map(|x| {eprintln!("got last key"); x});
             let atime_fut = Fs::get_prop_unmounted(tree_id, db3.clone(),
-                                                   PropertyName::Atime);
+                                                   PropertyName::Atime)
+                .map(|x| {eprintln!("got atime"); x});
             let recsize_fut = Fs::get_prop_unmounted(tree_id, db3.clone(),
-                                                     PropertyName::RecordSize);
+                                                     PropertyName::RecordSize)
+                .map(|x| {eprintln!("got recsize"); x});
             let di_fut = db3.fswrite(tree_id, 0, 1, 0, 0,
             move |dataset| async move {
                 // Delete all dying inodes.  If there are any, it means that
@@ -1074,7 +1077,8 @@ impl Fs {
                         .await?;
                 }
                 Ok(())
-            }).boxed();
+            }).boxed()
+                .map(|x| {eprintln!("got dying inodes "); x});
             future::try_join4(last_key_fut, atime_fut, recsize_fut, di_fut)
         }).map_err(Error::unhandled)
         .await.unwrap();
