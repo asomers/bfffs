@@ -406,7 +406,7 @@ mod fs {
             long,
             require_value_delimiter(true),
             value_delimiter(','),
-            default_value = "name"
+            default_value = "name,mountpoint"
         )]
         pub(super) properties: Vec<PropertyName>,
         /// Recursively display all children
