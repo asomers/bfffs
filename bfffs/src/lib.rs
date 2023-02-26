@@ -206,12 +206,18 @@ impl Bfffs {
         assert_eq!(nwrite, encoded.len());
 
         let mut buf = vec![0u8; BUFSIZ];
-        let nread = self.peer.recv(&mut buf).await.map_err(Error::from)?;
+        let mut nread = self.peer.recv(&mut buf).await.map_err(Error::from)?;
         if nread == 0 {
             eprintln!("Server did not send response");
-            Err(Error::EIO)
+            return Err(Error::EIO);
         } else if nread >= BUFSIZ {
+            buf.resize(BUFSIZ * 2, 0);
+            panic!();
+            let nread2 = self.peer.recv(&mut buf[BUFSIZ..]).await.map_err(Error::from)?;
+            dbg!(nread2);
+            nread += nread2;
             eprintln!("Server sent unexpectedly large response {nread} bytes");
+        //}
             Err(Error::EIO)
         } else {
             buf.truncate(nread);
