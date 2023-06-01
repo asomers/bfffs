@@ -332,15 +332,17 @@ mod errors {
         let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
         let wbuf0 = dbsw.try_const().unwrap();
         let wbuf1 = dbsw.try_const().unwrap();
-        let rbuf = dbsr.try_mut().unwrap();
         let zl = h.vdev.zone_limits(0);
 
-        // We must repeat the read for every chunk inthe stripe to ensure
+        // We must repeat the read for every chunk in the stripe to ensure
         // that we'll access the failing disk.
         h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
         h.gnops[0].error_prob(100);
-        for (t, db) in rbuf.into_chunks(BYTES_PER_LBA).enumerate() {
-            h.vdev.clone().read_at(db, zl.0 + t as u64).await.unwrap();
+        for t in 0..(dbsr.len() / BYTES_PER_LBA) {
+            let mut rbuf = dbsr.try_mut().unwrap();
+            rbuf.split_off(BYTES_PER_LBA * (t + 1));
+            rbuf.split_to(BYTES_PER_LBA * t);
+            h.vdev.clone().read_at(rbuf, zl.0 + t as u64).await.unwrap();
         }
         assert!(&wbuf1[..] == &dbsr.try_const().unwrap()[..],
             "miscompare!");
