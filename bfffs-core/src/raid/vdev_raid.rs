@@ -1045,6 +1045,7 @@ impl VdevRaidApi for VdevRaid {
 
     fn read_spacemap(&self, buf: IoVecMut, idx: u32) -> BoxVdevFut
     {
+        // TODO: handle failures
         Box::pin(self.mirrors[0].read_spacemap(buf, idx))
     }
 
