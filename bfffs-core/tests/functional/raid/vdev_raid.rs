@@ -81,6 +81,7 @@ mod errors {
         TryStreamExt,
         stream::FuturesUnordered
     };
+    use itertools::Itertools;
     use rand::{Rng, thread_rng};
     use rstest::rstest;
     use rstest_reuse::{apply, template};
@@ -370,30 +371,28 @@ mod errors {
     async fn read_at_triple_failure(c: Config) {
         require_root!();
         let mut h = harness(c).await;
-        for i in 0..(c.n as usize - 2) {
-            for j in (i + 1)..(c.n as usize - 1) {
-                for l in (j + 1)..(c.n as usize) {
-                    if i > 0 || j > 1 || l > 2 {
-                        h.reset().await;
-                    }
-                    let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
-                    let wbuf0 = dbsw.try_const().unwrap();
-                    let wbuf1 = dbsw.try_const().unwrap();
-                    let rbuf = dbsr.try_mut().unwrap();
+        let mut started = false;
+        for defective_diskids in (0..c.n as usize).combinations(3) {
+            if started {
+                h.reset().await;
+            }
+            started = true;
+            let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+            let wbuf0 = dbsw.try_const().unwrap();
+            let wbuf1 = dbsw.try_const().unwrap();
+            let rbuf = dbsr.try_mut().unwrap();
 
-                    let zl = h.vdev.zone_limits(0);
-                    h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
-                    h.gnops[i].error_prob(100);
-                    h.gnops[j].error_prob(100);
-                    h.gnops[l].error_prob(100);
-                    h.vdev.clone().read_at(rbuf, zl.0).await.unwrap();
-                    assert!(&wbuf1[..] == &dbsr.try_const().unwrap()[..],
-                        "miscompare!");
+            let zl = h.vdev.zone_limits(0);
+            h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
+            for id in defective_diskids.iter() {
+                h.gnops[*id].error_prob(100);
+            }
+            h.vdev.clone().read_at(rbuf, zl.0).await.unwrap();
+            assert!(&wbuf1[..] == &dbsr.try_const().unwrap()[..],
+                "miscompare!");
 
-                    h.gnops[i].error_prob(0);
-                    h.gnops[j].error_prob(0);
-                    h.gnops[l].error_prob(0);
-                }
+            for id in defective_diskids.iter() {
+                h.gnops[*id].error_prob(0);
             }
         }
     }
