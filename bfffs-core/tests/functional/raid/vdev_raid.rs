@@ -163,6 +163,8 @@ mod errors {
              case(config(3, 3, 1, 1)),
              // Smallest double-parity configuration
              case(config(5, 5, 2, 1)),
+             // Smallest triple-parity configuration
+             case(config(7, 7, 3, 1)),
      )]
     fn fully_clustered_configs(c: Config) {}
 
@@ -287,33 +289,46 @@ mod errors {
         let mut h = harness(c).await;
         for i in 0..(c.n - c.f) as usize {
             for j in (i + 1)..(c.n - (c.f - 1)) as usize {
-                let lrange = if c.f >= 2 {
-                    (j + 1)..(c.n as usize)
+                let krange = if c.f >= 2 {
+                    (j + 1)..(c.n - (c.f - 2)) as usize
                 } else {
                     0..1
                 };
-                for l in lrange {
-                    if i > 0 || j > 1 || l > 2 {
-                        h.reset().await;
-                    }
-                    let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
-                    let wbuf0 = dbsw.try_const().unwrap();
-                    let rbuf = dbsr.try_mut().unwrap();
+                for k in krange {
+                    let lrange = if c.f >= 3 {
+                        (k + 1)..(c.n - (c.f - 3)) as usize
+                    } else {
+                        0..1
+                    };
+                    for l in lrange {
+                        if i > 0 || j > 1 || k > 2 || l > 3 {
+                            h.reset().await;
+                        }
+                        let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+                        let wbuf0 = dbsw.try_const().unwrap();
+                        let rbuf = dbsr.try_mut().unwrap();
 
-                    let zl = h.vdev.zone_limits(0);
-                    h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
-                    h.gnops[i].error_prob(100);
-                    h.gnops[j].error_prob(100);
-                    if l > 0 {
-                        h.gnops[l].error_prob(100);
-                    }
-                    let r = h.vdev.clone().read_at(rbuf, zl.0).await;
-                    assert_eq!(r, Err(Error::EIO));
+                        let zl = h.vdev.zone_limits(0);
+                        h.vdev.write_at(wbuf0, 0, zl.0).await.unwrap();
+                        h.gnops[i].error_prob(100);
+                        h.gnops[j].error_prob(100);
+                        if k > 0 {
+                            h.gnops[k].error_prob(100);
+                        }
+                        if l > 0 {
+                            h.gnops[l].error_prob(100);
+                        }
+                        let r = h.vdev.clone().read_at(rbuf, zl.0).await;
+                        assert_eq!(r, Err(Error::EIO));
 
-                    h.gnops[i].error_prob(0);
-                    h.gnops[j].error_prob(0);
-                    if l > 0 {
-                        h.gnops[l].error_prob(0);
+                        h.gnops[i].error_prob(0);
+                        h.gnops[j].error_prob(0);
+                        if k > 0 {
+                            h.gnops[k].error_prob(0);
+                        }
+                        if l > 0 {
+                            h.gnops[l].error_prob(0);
+                        }
                     }
                 }
             }
