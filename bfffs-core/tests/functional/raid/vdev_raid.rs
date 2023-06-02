@@ -101,10 +101,9 @@ mod errors {
         n: i16,
         k: i16,
         f: i16,
-        chunksize: LbaT
     }
-    fn config(n: i16, k: i16, f: i16, chunksize: LbaT) -> Config {
-        Config{n, k, f, chunksize}
+    fn config(n: i16, k: i16, f: i16) -> Config {
+        Config{n, k, f}
     }
 
     struct Harness {
@@ -120,7 +119,7 @@ mod errors {
                 .map(|gnop| {
                     Mirror::create(&[gnop.as_path()], None).unwrap()
                 }).collect::<Vec<_>>();
-            let cs = NonZeroU64::new(self.config.chunksize);
+            let cs = NonZeroU64::new(1);
             let vdev = Arc::new(VdevRaid::create(cs, self.config.k,
                                                  self.config.f, mirrors));
             vdev.open_zone(0).await.unwrap();
@@ -133,7 +132,7 @@ mod errors {
             .prefix("vdev_raid::errors")
             .tempdir()
             .unwrap();
-        let cs = NonZeroU64::new(config.chunksize);
+        let cs = NonZeroU64::new(1);
         let gnops = (0..config.n).map(|_| Gnop::new().unwrap())
             .collect::<Vec<_>>();
         let mirrors = gnops.iter()
@@ -148,52 +147,52 @@ mod errors {
     #[template]
     #[rstest(c,
              // Smallest double-parity configuration
-             case(config(5, 5, 2, 1)),
+             case(config(5, 5, 2)),
              // Smallest triple-parity configuration
-             case(config(7, 7, 3, 1)),
+             case(config(7, 7, 3)),
              // Smallest quad-parity configuration
-             case(config(11, 9, 4, 1)),
+             case(config(11, 9, 4)),
      )]
     fn double_failure_tolerant_configs(c: Config) {}
 
     #[template]
     #[rstest(c,
              // Stupid mirror
-             case(config(2, 2, 1, 1)),
+             case(config(2, 2, 1)),
              // Smallest possible PRIMES configuration
-             case(config(3, 3, 1, 1)),
+             case(config(3, 3, 1)),
              // Smallest double-parity configuration
-             case(config(5, 5, 2, 1)),
+             case(config(5, 5, 2)),
              // Smallest triple-parity configuration
-             case(config(7, 7, 3, 1)),
+             case(config(7, 7, 3)),
      )]
     fn fully_clustered_configs(c: Config) {}
 
     #[template]
     #[rstest(c,
              // Stupid mirror
-             case(config(2, 2, 1, 1)),
+             case(config(2, 2, 1)),
              // Smallest possible PRIMES configuration
-             case(config(3, 3, 1, 1)),
+             case(config(3, 3, 1)),
              // Smallest PRIMES declustered configuration
-             case(config(5, 4, 1, 1)),
+             case(config(5, 4, 1)),
              // Smallest double-parity configuration
-             case(config(5, 5, 2, 1)),
+             case(config(5, 5, 2)),
              // Smallest non-ideal PRIME-S configuration
-             case(config(7, 4, 1, 1)),
+             case(config(7, 4, 1)),
              // Smallest triple-parity configuration
-             case(config(7, 7, 3, 1)),
+             case(config(7, 7, 3)),
              // Smallest quad-parity configuration
-             case(config(11, 9, 4, 1)),
+             case(config(11, 9, 4)),
      )]
     fn single_failure_tolerant_configs(c: Config) {}
 
     #[template]
     #[rstest(c,
              // Smallest triple-parity configuration
-             case(config(7, 7, 3, 1)),
+             case(config(7, 7, 3)),
              // Smallest quad-parity configuration
-             case(config(11, 9, 4, 1)),
+             case(config(11, 9, 4)),
      )]
     fn triple_failure_tolerant_configs(c: Config) {}
 
@@ -205,19 +204,19 @@ mod errors {
     async fn read_at_single_failure(
         #[values(
              // Stupid mirror
-             config(2, 2, 1, 1),
+             config(2, 2, 1),
              // Smallest possible PRIMES configuration
-             config(3, 3, 1, 1),
+             config(3, 3, 1),
              // Smallest PRIMES declustered configuration
-             config(5, 4, 1, 1),
+             config(5, 4, 1),
              // Smallest double-parity configuration
-             config(5, 5, 2, 1),
+             config(5, 5, 2),
              // Smallest non-ideal PRIME-S configuration
-             config(7, 4, 1, 1),
+             config(7, 4, 1),
              // Smallest triple-parity configuration
-             config(7, 7, 3, 1),
+             config(7, 7, 3),
              // Smallest quad-parity configuration
-             config(11, 9, 4, 1),
+             config(11, 9, 4),
         )]
         c: Config,
         #[values(1, 2)]
@@ -230,7 +229,7 @@ mod errors {
                 h.gnops[i - 1].error_prob(0);
                 h.reset().await;
             }
-            let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, stripes);
+            let (dbsw, dbsr) = make_bufs(1, c.k, c.f, stripes);
             let wbuf0 = dbsw.try_const().unwrap();
             let wbuf1 = dbsw.try_const().unwrap();
             let rbuf = dbsr.try_mut().unwrap();
@@ -256,7 +255,7 @@ mod errors {
                 if i > 0 || j > 1 {
                     h.reset().await;
                 }
-                let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+                let (dbsw, dbsr) = make_bufs(1, c.k, c.f, 1);
                 let wbuf0 = dbsw.try_const().unwrap();
                 let wbuf1 = dbsw.try_const().unwrap();
                 let rbuf = dbsr.try_mut().unwrap();
@@ -305,7 +304,7 @@ mod errors {
                         if i > 0 || j > 1 || k > 2 || l > 3 {
                             h.reset().await;
                         }
-                        let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+                        let (dbsw, dbsr) = make_bufs(1, c.k, c.f, 1);
                         let wbuf0 = dbsw.try_const().unwrap();
                         let rbuf = dbsr.try_mut().unwrap();
 
@@ -345,7 +344,7 @@ mod errors {
     {
         require_root!();
         let mut h = harness(c).await;
-        let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+        let (dbsw, dbsr) = make_bufs(1, c.k, c.f, 1);
         let wbuf0 = dbsw.try_const().unwrap();
         let wbuf1 = dbsw.try_const().unwrap();
         let zl = h.vdev.zone_limits(0);
@@ -377,7 +376,7 @@ mod errors {
                 h.reset().await;
             }
             started = true;
-            let (dbsw, dbsr) = make_bufs(c.chunksize, c.k, c.f, 1);
+            let (dbsw, dbsr) = make_bufs(1, c.k, c.f, 1);
             let wbuf0 = dbsw.try_const().unwrap();
             let wbuf1 = dbsw.try_const().unwrap();
             let rbuf = dbsr.try_mut().unwrap();
