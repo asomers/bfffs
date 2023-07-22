@@ -1229,7 +1229,7 @@ mod read_at {
             }).return_once(|_, _|  Box::pin( future::ok::<(), Error>(())));
         mirrors.push(Child::present(m1));
 
-        let mut m2 = mock_mirror();
+        let m2 = mock_mirror();
         mirrors.push(Child::present(m2));
 
         let vdev_raid = Arc::new(
