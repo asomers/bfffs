@@ -1793,6 +1793,52 @@ mod sync_all {
 mod write_at {
     use super::*;
 
+    // Writes should skip missing children
+    #[test]
+    fn degraded() {
+        let k = 3;
+        let f = 1;
+        const CHUNKSIZE : LbaT = 2;
+
+        let mut mirrors = Vec::<Child>::new();
+        let mut m0 = mock_mirror();
+        m0.expect_open_zone()
+            .with(eq(60_000))
+            .once()
+            .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+        m0.expect_write_at()
+            .once()
+            .withf(|buf, lba|
+                   buf.len() == CHUNKSIZE as usize * BYTES_PER_LBA
+                   && *lba == 60_000
+            ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        mirrors.push(Child::present(m0));
+        let mut m1 = mock_mirror();
+        m1.expect_open_zone()
+            .with(eq(60_000))
+            .once()
+            .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+        m1.expect_write_at()
+            .once()
+            .withf(|buf, lba|
+                buf.len() == CHUNKSIZE as usize * BYTES_PER_LBA
+                && *lba == 60_000
+            ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        mirrors.push(Child::present(m1));
+        mirrors.push(Child::missing(Uuid::new_v4()));
+
+        let vdev_raid = VdevRaid::new(CHUNKSIZE, k, f,
+                                      Uuid::new_v4(),
+                                      LayoutAlgorithm::PrimeS,
+                                      mirrors.into_boxed_slice());
+        let dbs = DivBufShared::from(vec![0u8; 16384]);
+        let wbuf = dbs.try_const().unwrap();
+        vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
+        vdev_raid.write_at(wbuf, 1, 120_000).now_or_never().unwrap().unwrap();
+    }
+
     // Use mock Mirror objects to test that RAID writes hit the right LBAs from
     // the individual disks.  Ignore the actual data values, since we don't have
     // real Mirrors.  Functional testing will verify the data.
