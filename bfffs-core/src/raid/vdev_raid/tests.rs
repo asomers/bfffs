@@ -754,6 +754,117 @@ mod erase_zone {
     }
 }
 
+mod finish_zone {
+    use super::*;
+
+    /// A zone with an empty stripe buffer requires no flushing
+    #[test]
+    fn empty_sb() {
+        let k = 3;
+        let f = 1;
+        const CHUNKSIZE: LbaT = 2;
+
+        let mut mirrors = Vec::<Child>::new();
+
+        let bd = || {
+            let mut bd = mock_mirror();
+            bd.expect_open_zone()
+                .once()
+                .with(eq(60_000))
+                .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+            bd.expect_finish_zone()
+                .with(eq(60_000), eq(119_999))
+                .once()
+                .return_once(|_, _| Box::pin(future::ok(())));
+            Child::present(bd)
+        };
+
+        let bd0 = bd();
+        let bd1 = bd();
+        let bd2 = bd();
+        mirrors.push(bd0);
+        mirrors.push(bd1);
+        mirrors.push(bd2);
+
+        let vdev_raid = VdevRaid::new(CHUNKSIZE, k, f,
+                                      Uuid::new_v4(),
+                                      LayoutAlgorithm::PrimeS,
+                                      mirrors.into_boxed_slice());
+        vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
+        vdev_raid.finish_zone(1).now_or_never().unwrap().unwrap();
+    }
+
+    /// With a partially full stripe buffer, vdev_raid should pad it with zeros
+    /// and write it out during finish_zone
+    #[test]
+    fn partial_sb() {
+        let k = 3;
+        let f = 1;
+        const CHUNKSIZE: LbaT = 2;
+
+        let mut mirrors = Vec::<Child>::new();
+
+        let bd = || {
+            let mut bd = mock_mirror();
+            bd.expect_open_zone()
+                .with(eq(60_000))
+                .once()
+                .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+            bd.expect_finish_zone()
+                .with(eq(60_000), eq(119_999))
+                .once()
+                .return_once(|_, _| Box::pin(future::ok(())));
+            bd
+        };
+
+        let mut bd0 = bd();
+        bd0.expect_writev_at()
+            .once()
+            .withf(|buf, lba|
+                // The first segment is user data
+                buf[0][..] == vec![1u8; BYTES_PER_LBA][..] &&
+                // Later segments are zero-fill from finish_zone
+                buf[1][..] == vec![0u8; BYTES_PER_LBA][..] &&
+                *lba == 60_000
+            ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        let mut bd1 = bd();
+        // This write is from the zero-fill
+        bd1.expect_writev_at()
+            .once()
+            .withf(|buf, lba|
+                buf.len() == 1 &&
+                buf[0][..] == vec![0u8; 2 * BYTES_PER_LBA][..] &&
+                *lba == 60_000
+        ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        // This write is generated parity
+        let mut bd2 = bd();
+        bd2.expect_write_at()
+            .once()
+            .withf(|buf, lba|
+                // single disk parity is a simple XOR
+                buf[0..4096] == vec![1u8; BYTES_PER_LBA][..] &&
+                buf[4096..8192] == vec![0u8; BYTES_PER_LBA][..] &&
+                *lba == 60_000
+        ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        mirrors.push(Child::present(bd0));
+        mirrors.push(Child::present(bd1));
+        mirrors.push(Child::present(bd2));
+
+        let vdev_raid = VdevRaid::new(CHUNKSIZE, k, f,
+                                      Uuid::new_v4(),
+                                      LayoutAlgorithm::PrimeS,
+                                      mirrors.into_boxed_slice());
+        let dbs = DivBufShared::from(vec![1u8; 4096]);
+        let wbuf = dbs.try_const().unwrap();
+        vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
+        vdev_raid.write_at(wbuf, 1, 120_000).now_or_never().unwrap().unwrap();
+        vdev_raid.finish_zone(1).now_or_never().unwrap().unwrap();
+    }
+}
+
 mod flush_zone {
     use super::*;
 
@@ -810,6 +921,71 @@ mod flush_zone {
                                       LayoutAlgorithm::PrimeS,
                                       mirrors.into_boxed_slice());
         vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
+        vdev_raid.flush_zone(1).1.now_or_never().unwrap().unwrap();
+    }
+
+    // Partially written stripes should be flushed by flush_zone
+    #[test]
+    fn partial_stripe_buffer() {
+        let k = 3;
+        let f = 1;
+        const CHUNKSIZE: LbaT = 2;
+
+        let mut mirrors = Vec::<Child>::new();
+
+        let bd = || {
+            let mut bd = mock_mirror();
+            bd.expect_open_zone()
+                .with(eq(60_000))
+                .once()
+                .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+            bd
+        };
+
+        let mut bd0 = bd();
+        bd0.expect_writev_at()
+            .once()
+            .withf(|buf, lba|
+                // The first segment is user data
+                buf[0][..] == vec![1u8; BYTES_PER_LBA][..] &&
+                // Later segments are zero-fill from flush_zone
+                buf[1][..] == vec![0u8; BYTES_PER_LBA][..] &&
+                *lba == 60_000
+            ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        let mut bd1 = bd();
+        // This write is from the zero-fill
+        bd1.expect_writev_at()
+            .once()
+            .withf(|buf, lba|
+                buf.len() == 1 &&
+                buf[0][..] == vec![0u8; 2 * BYTES_PER_LBA][..] &&
+                *lba == 60_000
+        ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        // This write is generated parity
+        let mut bd2 = bd();
+        bd2.expect_write_at()
+            .once()
+            .withf(|buf, lba|
+                // single disk parity is a simple XOR
+                buf[0..4096] == vec![1u8; BYTES_PER_LBA][..] &&
+                buf[4096..8192] == vec![0u8; BYTES_PER_LBA][..] &&
+                *lba == 60_000
+        ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        mirrors.push(Child::present(bd0));
+        mirrors.push(Child::present(bd1));
+        mirrors.push(Child::present(bd2));
+
+        let vdev_raid = VdevRaid::new(CHUNKSIZE, k, f,
+                                      Uuid::new_v4(),
+                                      LayoutAlgorithm::PrimeS,
+                                      mirrors.into_boxed_slice());
+        let dbs = DivBufShared::from(vec![1u8; 4096]);
+        let wbuf = dbs.try_const().unwrap();
+        vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
+        vdev_raid.write_at(wbuf, 1, 120_000).now_or_never().unwrap().unwrap();
         vdev_raid.flush_zone(1).1.now_or_never().unwrap().unwrap();
     }
 }
@@ -1501,9 +1677,10 @@ mod write_at {
         vdev_raid.write_at(wbuf, 1, 120_000).now_or_never().unwrap().unwrap();
     }
 
-    // Partially written stripes should be flushed by flush_zone
+    /// vdev_raid should buffer writes of less than a stripe.  They won't be
+    /// sent to the mirrors until flush_zone or finish_zone
     #[test]
-    fn write_and_flush_zone() {
+    fn partial_stripe() {
         let k = 3;
         let f = 1;
         const CHUNKSIZE: LbaT = 2;
@@ -1516,40 +1693,14 @@ mod write_at {
                 .with(eq(60_000))
                 .once()
                 .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+            bd.expect_writev_at()
+                .never();
             bd
         };
 
-        let mut bd0 = bd();
-        bd0.expect_writev_at()
-            .once()
-            .withf(|buf, lba|
-                // The first segment is user data
-                buf[0][..] == vec![1u8; BYTES_PER_LBA][..] &&
-                // Later segments are zero-fill from flush_zone
-                buf[1][..] == vec![0u8; BYTES_PER_LBA][..] &&
-                *lba == 60_000
-            ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
-
-        let mut bd1 = bd();
-        // This write is from the zero-fill
-        bd1.expect_writev_at()
-            .once()
-            .withf(|buf, lba|
-                buf.len() == 1 &&
-                buf[0][..] == vec![0u8; 2 * BYTES_PER_LBA][..] &&
-                *lba == 60_000
-        ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
-
-        // This write is generated parity
-        let mut bd2 = bd();
-        bd2.expect_write_at()
-            .once()
-            .withf(|buf, lba|
-                // single disk parity is a simple XOR
-                buf[0..4096] == vec![1u8; BYTES_PER_LBA][..] &&
-                buf[4096..8192] == vec![0u8; BYTES_PER_LBA][..] &&
-                *lba == 60_000
-        ).return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+        let bd0 = bd();
+        let bd1 = bd();
+        let bd2 = bd();
 
         mirrors.push(Child::present(bd0));
         mirrors.push(Child::present(bd1));
@@ -1563,7 +1714,6 @@ mod write_at {
         let wbuf = dbs.try_const().unwrap();
         vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
         vdev_raid.write_at(wbuf, 1, 120_000).now_or_never().unwrap().unwrap();
-        vdev_raid.flush_zone(1).1.now_or_never().unwrap().unwrap();
     }
 }
 // LCOV_EXCL_STOP
