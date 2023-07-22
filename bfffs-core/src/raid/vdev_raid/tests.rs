@@ -1524,19 +1524,17 @@ mod read_at {
         const CHUNKSIZE : LbaT = 2;
 
         let mut m1 = mock_mirror();
-        m1.expect_read_at()
+        m1.expect_readv_at()
             .once()
             .withf(|buf, lba| {
-                buf.len() == CHUNKSIZE as usize * BYTES_PER_LBA
-                    && *lba == 60_000
+                buf.len() == 3 && *lba == 60_000
             }).return_once(|_, _|  Box::pin( future::ok::<(), Error>(())));
 
         let mut m2 = mock_mirror();
-        m2.expect_read_at()
+        m2.expect_readv_at()
             .once()
             .withf(|buf, lba| {
-                buf.len() == CHUNKSIZE as usize * BYTES_PER_LBA
-                    && *lba == 60_000
+                buf.len() == 3 && *lba == 60_002
             }).return_once(|_, _|  Box::pin(future::ok::<(), Error>(())));
 
         let mirrors = vec![
