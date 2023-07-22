@@ -959,10 +959,47 @@ mod flush_zone {
         vdev_raid.flush_zone(0).1.now_or_never().unwrap().unwrap();
     }
 
-    /// Flushing a zone with missing device?
+    /// Flushing a zone with missing device should not attempt to write to the
+    /// missing device.
     #[test]
     fn degraded() {
-        todo!()
+        let k = 3;
+        let f = 1;
+        const CHUNKSIZE: LbaT = 2;
+
+        let mut mirrors = Vec::<Child>::new();
+
+        let bd = || {
+            let mut bd = mock_mirror();
+            bd.expect_open_zone()
+                .with(eq(60_000))
+                .once()
+                .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+            bd
+        };
+
+        let mut bd1 = bd();
+        bd1.expect_writev_at()
+            .once()
+            .return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        let mut bd2 = bd();
+        bd2.expect_writev_at()
+            .return_once(|_, _| Box::pin( future::ok::<(), Error>(())));
+
+        mirrors.push(Child::missing(Uuid::new_v4()));
+        mirrors.push(Child::present(bd1));
+        mirrors.push(Child::present(bd2));
+
+        let vdev_raid = VdevRaid::new(CHUNKSIZE, k, f,
+                                      Uuid::new_v4(),
+                                      LayoutAlgorithm::PrimeS,
+                                      mirrors.into_boxed_slice());
+        let dbs = DivBufShared::from(vec![1u8; 4096]);
+        let wbuf = dbs.try_const().unwrap();
+        vdev_raid.open_zone(1).now_or_never().unwrap().unwrap();
+        vdev_raid.write_at(wbuf, 1, 120_000).now_or_never().unwrap().unwrap();
+        vdev_raid.flush_zone(1).1.now_or_never().unwrap().unwrap();
     }
 
     // Flushing an open zone is a no-op if the stripe buffer is empty

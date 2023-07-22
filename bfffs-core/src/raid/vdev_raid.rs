@@ -217,20 +217,20 @@ impl Child {
         }
     }
 
-    fn erase_zone(&self, start: LbaT, end: LbaT) -> BoxVdevFut {
-        self.as_present().unwrap().erase_zone(start, end)
+    fn erase_zone(&self, start: LbaT, end: LbaT) -> Option<BoxVdevFut> {
+        self.as_present().map(|m| m.erase_zone(start, end))
     }
 
-    fn finish_zone(&self, start: LbaT, end: LbaT) -> BoxVdevFut {
-        self.as_present().unwrap().finish_zone(start, end)
+    fn finish_zone(&self, start: LbaT, end: LbaT) -> Option<BoxVdevFut> {
+        self.as_present().map(|m| m.finish_zone(start, end))
+    }
+
+    fn is_present(&self) -> bool {
+        matches!(self, Child::Present(_))
     }
 
     fn open_zone(&self, start: LbaT) -> BoxVdevFut {
-        if let Child::Present(m) = self {
-            m.open_zone(start)
-        } else {
-            Box::pin(future::ok(())) as BoxVdevFut
-        }
+        self.as_present().unwrap().open_zone(start)
     }
 
     fn read_at(&self, buf: IoVecMut, lba: LbaT) -> ChildReadAt {
@@ -279,8 +279,8 @@ impl Child {
         self.as_present().map(Mirror::size)
     }
 
-    fn sync_all(&self) -> BoxVdevFut {
-        self.as_present().unwrap().sync_all()
+    fn sync_all(&self) -> Option<BoxVdevFut> {
+        self.as_present().map(Mirror::sync_all)
     }
 
     fn uuid(&self) -> Uuid {
@@ -592,6 +592,10 @@ impl VdevRaid {
         let start_disk_chunk = div_roundup(first_disk_lba, self.chunksize);
         let futs = FuturesUnordered::<BoxVdevFut>::new();
         for (idx, mirrordev) in self.children.iter().enumerate() {
+            if !mirrordev.is_present() {
+                continue;
+            }
+
             // Find the first LBA of this disk that's within our zone
             let mut first_usable_disk_lba = 0;
             for chunk in start_disk_chunk.. {
@@ -1152,7 +1156,7 @@ impl Vdev for VdevRaid {
         );
         // TODO: handle errors on some devices
         let fut = self.children.iter()
-        .map(|bd| bd.sync_all())
+        .filter_map(|bd| bd.sync_all())
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>()
         .map_ok(drop);
@@ -1249,7 +1253,7 @@ impl VdevRaidApi for VdevRaid {
         assert!(!self.stripe_buffers.read().unwrap().contains_key(&zone),
             "Tried to erase an open zone");
         let (start, end) = self.first_healthy_child().zone_limits(zone);
-        let fut = self.children.iter().map(|mirrordev| {
+        let fut = self.children.iter().filter_map(|mirrordev| {
             mirrordev.erase_zone(start, end - 1)
         }).collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>()
@@ -1272,8 +1276,9 @@ impl VdevRaidApi for VdevRaid {
         }
         futs.extend(
             self.children.iter()
-            .map(|mirrordev|
-                 Box::pin(mirrordev.finish_zone(start, end - 1)) as BoxVdevFut
+            .filter_map(|mirrordev|
+                 mirrordev.finish_zone(start, end - 1)
+                 .map(|fut| Box::pin(fut) as BoxVdevFut)
             )
         );
 
