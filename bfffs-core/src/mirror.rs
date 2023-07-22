@@ -23,11 +23,12 @@ use futures::{
     Future,
     TryFutureExt,
     TryStreamExt,
+    future,
     stream::FuturesUnordered,
     task::{Context, Poll}
 };
 #[cfg(not(test))]
-use futures::{FutureExt, StreamExt, future};
+use futures::{FutureExt, StreamExt};
 use pin_project::pin_project;
 use serde_derive::{Deserialize, Serialize};
 
@@ -161,16 +162,22 @@ impl Child {
         self.as_present().map(|bd| bd.open_zone(start))
     }
 
-    fn read_at(&self, buf: IoVecMut, lba: LbaT) -> VdevBlockFut {
-        self.as_present().unwrap().read_at(buf, lba)
+    fn read_at(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut {
+        match self {
+            Child::Present(c) => Box::pin(c.read_at(buf, lba)) ,
+            Child::Missing(_) => Box::pin(future::err(Error::ENXIO))
+        }
     }
 
     fn read_spacemap(&self, buf: IoVecMut, smidx: u32) -> VdevBlockFut {
         self.as_present().unwrap().read_spacemap(buf, smidx)
     }
 
-    fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> VdevBlockFut {
-        self.as_present().unwrap().readv_at(bufs, lba)
+    fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> BoxVdevFut {
+        match self {
+            Child::Present(c) => Box::pin(c.readv_at(bufs, lba)),
+            Child::Missing(_) => Box::pin(future::err(Error::ENXIO))
+        }
     }
 
     fn status(&self) -> Option<vdev_block::Status> {
@@ -551,7 +558,7 @@ pub struct ReadAt {
     dbi: DivBufInaccessible,
     lba: LbaT,
     #[pin]
-    fut: VdevBlockFut,
+    fut: BoxVdevFut,
 }
 impl Future for ReadAt {
     type Output = Result<()>;
@@ -644,7 +651,7 @@ pub struct ReadvAt {
     /// Address to read from the lower devices
     lba: LbaT,
     #[pin]
-    fut: VdevBlockFut,
+    fut: BoxVdevFut,
 }
 impl Future for ReadvAt {
     type Output = Result<()>;
@@ -1143,10 +1150,12 @@ mod t {
                 .return_once(|_| Box::pin(future::ok::<(), Error>(())));
             bd.expect_readv_at()
                 .times(times)
-                .withf(|sglist, lba|
+                .withf(|sglist, lba| {
+                    dbg!(&lba, sglist.len(), sglist[0].len());
                     sglist.len() == 1
                     && sglist[0].len() == 4096
                     && *lba == 3
+                }
                 ).returning(move |_, _| {
                     total_reads.fetch_add(1, Ordering::Relaxed);
                     Box::pin(future::ready(r))
@@ -1176,9 +1185,26 @@ mod t {
         #[test]
         fn degraded() {
             let dbs = DivBufShared::from(vec![0u8; 4096]);
-            let total_reads = Arc::new(AtomicU32::new(0));
 
-            let bd0 = mock(2, Ok(()), total_reads.clone());
+            let mut bd0 = mock_vdev_block();
+            bd0.expect_open_zone()
+                .once()
+                .with(eq(0))
+                .return_once(|_| Box::pin(future::ok::<(), Error>(())));
+            bd0.expect_readv_at()
+                .times(1)
+                .withf(|sglist, lba| {
+                    sglist.len() == 1
+                    && sglist[0].len() == 4096
+                    && *lba == 3
+                }).returning(move |_, _| Box::pin(future::ok(())));
+            bd0.expect_readv_at()
+                .times(1)
+                .withf(|sglist, lba| {
+                    sglist.len() == 1
+                    && sglist[0].len() == 4096
+                    && *lba == 4
+                }).returning(move |_, _| Box::pin(future::ok(())));
             let children = vec![
                 Child::present(bd0),
                 Child::missing(Uuid::new_v4())
@@ -1190,7 +1216,6 @@ mod t {
                 let sglist = vec![buf];
                 mirror.readv_at(sglist, i).now_or_never().unwrap().unwrap();
             }
-            assert_eq!(total_reads.load(Ordering::Relaxed), 2);
         }
 
         /// If a read returns EIO, Mirror should retry it on another child.
