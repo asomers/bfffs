@@ -233,8 +233,12 @@ impl Child {
         self.as_present().unwrap().open_zone(start)
     }
 
-    fn read_at(&self, buf: IoVecMut, lba: LbaT) -> ChildReadAt {
-        self.as_present().unwrap().read_at(buf, lba)
+    fn read_at(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut {
+        if let Child::Present(c) = self {
+            c.read_at(buf, lba)
+        } else {
+            Box::pin(future::err(Error::ENXIO)) as BoxVdevFut
+        }
     }
 
     fn read_spacemap(&self, buf: IoVecMut, smidx: u32) -> ChildReadSpacemap {
@@ -242,7 +246,11 @@ impl Child {
     }
 
     fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> ChildReadvAt {
-        self.as_present().unwrap().readv_at(bufs, lba)
+        if let Child::Present(c) = self {
+            c.readv_at(bufs, lba)
+        } else {
+            Box::pin(future::err(Error::ENXIO)) as BoxVdevFut
+        }
     }
 
     fn status(&self) -> Option<mirror::Status> {

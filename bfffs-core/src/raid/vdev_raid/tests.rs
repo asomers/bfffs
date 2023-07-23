@@ -1526,18 +1526,20 @@ mod read_at {
         const CHUNKSIZE : LbaT = 2;
 
         let mut m1 = mock_mirror();
+        m1.expect_read_at()
+            .times(2)
+            .returning(|_, _|  Box::pin( future::ok::<(), Error>(())));
         m1.expect_readv_at()
             .once()
-            .withf(|buf, lba| {
-                buf.len() == 3 && *lba == 60_000
-            }).return_once(|_, _|  Box::pin( future::ok::<(), Error>(())));
+            .returning(|_, _|  Box::pin( future::ok::<(), Error>(())));
 
         let mut m2 = mock_mirror();
+        m2.expect_read_at()
+            .once()
+            .returning(|_, _|  Box::pin(future::ok::<(), Error>(())));
         m2.expect_readv_at()
             .once()
-            .withf(|buf, lba| {
-                buf.len() == 3 && *lba == 60_002
-            }).return_once(|_, _|  Box::pin(future::ok::<(), Error>(())));
+            .returning(|_, _|  Box::pin( future::ok::<(), Error>(())));
 
         let mirrors = vec![
             Child::missing(Uuid::new_v4()),
