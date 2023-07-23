@@ -751,8 +751,8 @@ impl VdevRaid {
                     let slba = lba.max(s * lbas_per_stripe);
                     let elba = past_lba.min((s + 1) * lbas_per_stripe);
                     let sbytes = (elba - slba) as usize * BYTES_PER_LBA;
-                    let start = ChunkId::Data(slba);
-                    let end = ChunkId::Data(elba);
+                    let start = ChunkId::Data(slba / self.chunksize);
+                    let end = ChunkId::Data(elba / self.chunksize);
                     let lociter = self.locator.iter_data(start, end);
                     let dvs = lociter
                         .map(|(_cid, loc)| dv[loc.disk as usize])

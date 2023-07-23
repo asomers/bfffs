@@ -538,7 +538,7 @@ mod errors {
             #[values(1, 2, 3)]
             stripes: usize)
         {
-            let mut h = harness(c, 1).await;
+            let mut h = harness(c, 2).await;
             let mut started = false;
             for defective_diskids in (0..c.n as usize).combinations(c.nfailures)
             {
@@ -587,7 +587,9 @@ mod errors {
             #[values(1, 2)]
             stripes: usize)
         {
-            let mut h = harness(c, 1).await;
+            const CHUNKSIZE: LbaT = 2;
+
+            let mut h = harness(c, CHUNKSIZE).await;
             let mut started = false;
             for defective_diskids in (0..c.n as usize).combinations(c.nfailures)
             {
@@ -595,7 +597,7 @@ mod errors {
                     h.reset().await;
                 }
                 started = true;
-                let (dbsw, dbsr) = make_bufs(1, c.k, c.f, stripes);
+                let (dbsw, dbsr) = make_bufs(CHUNKSIZE, c.k, c.f, stripes);
                 let wbuf0 = dbsw.try_const().unwrap();
                 let rbuf = dbsr.try_mut().unwrap();
 
