@@ -235,7 +235,7 @@ impl Child {
 
     fn read_at(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut {
         if let Child::Present(c) = self {
-            c.read_at(buf, lba)
+            Box::pin(c.read_at(buf, lba)) as BoxVdevFut
         } else {
             Box::pin(future::err(Error::ENXIO)) as BoxVdevFut
         }
@@ -245,9 +245,9 @@ impl Child {
         self.as_present().unwrap().read_spacemap(buf, smidx)
     }
 
-    fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> ChildReadvAt {
+    fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> BoxVdevFut {
         if let Child::Present(c) = self {
-            c.readv_at(bufs, lba)
+            Box::pin(c.readv_at(bufs, lba)) as BoxVdevFut
         } else {
             Box::pin(future::err(Error::ENXIO)) as BoxVdevFut
         }
