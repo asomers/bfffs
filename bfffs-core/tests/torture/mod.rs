@@ -8,6 +8,8 @@ pub mod util {
 }
 
 mod fs;
+mod vdev_raid;
+
 use util::PoolBuilder;
 
 fn test_scale() -> f64 {
