@@ -817,7 +817,7 @@ impl VdevRaid {
         let (start_lba, end_lba) = if faulted_children > 0 {
             (stripe_lba, stripe_lba + lbas_per_stripe)
         } else {
-            (lba, lba + (buf.len() / col_len) as LbaT)
+            (lba, lba + (buf.len() / BYTES_PER_LBA) as LbaT)
         };
 
         let data_bufs: Vec<IoVecMut> = if lba % self.chunksize == 0 {
@@ -854,7 +854,7 @@ impl VdevRaid {
         } else if end_lba % lbas_per_stripe == 0 {
             ChunkId::Parity(stripe_lba / self.chunksize, 0)
         } else {
-            ChunkId::Data(end_lba / self.chunksize)
+            ChunkId::Data(div_roundup(end_lba, self.chunksize))
         };
         dbg!(start_cid, end_cid, start_lba, end_lba, lbas_per_stripe);
 
@@ -866,9 +866,16 @@ impl VdevRaid {
             dbg!(&cid);
             let cid_lba = cid.address() * self.chunksize;
             let (d, disk_lba) = if cid_lba < lba || cid_lba >= end_lba {
-                debug_assert!(faulted_children > 0);
-                assert!(lba % self.chunksize == 0, "TODO");
-                (exmuts.as_mut().unwrap().next().unwrap(), loc.offset * self.chunksize)
+                if faulted_children > 0 {
+                    assert!(lba % self.chunksize == 0, "TODO");
+                    (exmuts.as_mut().unwrap().next().unwrap(), loc.offset * self.chunksize)
+                } else {
+                    debug_assert!(first);
+                    first = false;
+                    let chunk_offset = lba % self.chunksize;
+                    let disk_lba = loc.offset * self.chunksize + chunk_offset;
+                    (data_bufs_iter.next().unwrap(), disk_lba)
+                }
             } else if first {
                 // The op may begin mid-chunk
                 first = false;
