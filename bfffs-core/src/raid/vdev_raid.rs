@@ -798,20 +798,11 @@ impl VdevRaid {
 
     /// Read a (possibly improper) subset of one stripe
     fn read_at_one(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> impl Future<Output=Result<()>>{
-        dbg!(&lba, buf.len());
         let col_len = self.chunksize as usize * BYTES_PER_LBA;
         let m = (self.codec.stripesize() - self.codec.protection()) as usize;
         let lbas_per_stripe = self.chunksize * m as LbaT;
         let dbi = buf.clone_inaccessible();
         let faulted_children = self.faulted_children();
-
-        //let opcount = if faulted_children > 0 {
-            //m
-        //} else if lba % self.chunksize == 0 {
-            //buf.len() / col_len
-        //} else {
-            //buf.len() / col_len + 1
-        //};
 
         let stripe_lba = lba - lba % lbas_per_stripe;
         let (start_lba, end_lba) = if faulted_children > 0 {
@@ -849,14 +840,14 @@ impl VdevRaid {
         });
 
         let start_cid = ChunkId::Data(start_lba / self.chunksize);
+        let end_lba_remainder = end_lba % lbas_per_stripe;
         let end_cid = if faulted_children > 0 {
             ChunkId::Parity(start_lba / self.chunksize, faulted_children)
-        } else if end_lba % lbas_per_stripe == 0 {
+        } else if end_lba_remainder == 0 || (lbas_per_stripe - end_lba_remainder) < self.chunksize {
             ChunkId::Parity(stripe_lba / self.chunksize, 0)
         } else {
             ChunkId::Data(div_roundup(end_lba, self.chunksize))
         };
-        dbg!(start_cid, end_cid, start_lba, end_lba, lbas_per_stripe);
 
         // TODO: eliminate the ::collect<Vec<_>>() for data_bufs above
         let mut data_bufs_iter = data_bufs.into_iter();
@@ -865,25 +856,37 @@ impl VdevRaid {
         .map(|(cid, loc)| {
             dbg!(&cid);
             let cid_lba = cid.address() * self.chunksize;
-            let (d, disk_lba) = if cid_lba < lba || cid_lba >= end_lba {
-                if faulted_children > 0 {
-                    assert!(lba % self.chunksize == 0, "TODO");
-                    (exmuts.as_mut().unwrap().next().unwrap(), loc.offset * self.chunksize)
-                } else {
-                    debug_assert!(first);
-                    first = false;
-                    let chunk_offset = lba % self.chunksize;
-                    let disk_lba = loc.offset * self.chunksize + chunk_offset;
-                    (data_bufs_iter.next().unwrap(), disk_lba)
-                }
-            } else if first {
-                // The op may begin mid-chunk
-                first = false;
+            let cid_end_lba = cid_lba + self.chunksize;
+            let (d, disk_lba) = if cid_end_lba <= lba {
+                // This chunk is only needed for parity reconstruction
+                debug_assert!(faulted_children > 0);
+                (exmuts.as_mut().unwrap().next().unwrap(), loc.offset * self.chunksize)
+            } else if cid_lba < lba && faulted_children > 0 {
+                // This chunk is needed partly by the caller and partly for
+                // parity reconstruction
+                todo!()
+            } else if cid_lba < lba {
+                // Part of this chunk is needed by the caller
+                debug_assert!(first);
+                first = true;
                 let chunk_offset = lba % self.chunksize;
                 let disk_lba = loc.offset * self.chunksize + chunk_offset;
                 (data_bufs_iter.next().unwrap(), disk_lba)
-            } else {
+            } else if cid_end_lba <= end_lba {
+                // This chunk is needed by the caller
                 (data_bufs_iter.next().unwrap(), loc.offset * self.chunksize)
+            } else if cid_lba < end_lba && faulted_children == 0 {
+                // Part of this chunk is needed by the caller
+                (data_bufs_iter.next().unwrap(), loc.offset * self.chunksize)
+            } else if cid_lba < end_lba {
+                // This chunk is needed partly by the caller and partly for
+                // parity reconstruction
+                todo!()
+            } else {
+                debug_assert!(cid_lba >= end_lba);
+                // This chunk is only needed for parity reconstruction
+                debug_assert!(faulted_children > 0);
+                (exmuts.as_mut().unwrap().next().unwrap(), loc.offset * self.chunksize)
             };
             self.children[loc.disk as usize].read_at(d, disk_lba)
         }).collect::<FuturesOrdered<_>>()
