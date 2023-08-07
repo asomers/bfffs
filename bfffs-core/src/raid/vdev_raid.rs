@@ -799,7 +799,8 @@ impl VdevRaid {
     /// Read a (possibly improper) subset of one stripe
     fn read_at_one(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> impl Future<Output=Result<()>>{
         let col_len = self.chunksize as usize * BYTES_PER_LBA;
-        let m = (self.codec.stripesize() - self.codec.protection()) as usize;
+        let f = self.codec.protection();
+        let m = (self.codec.stripesize() - f) as usize;
         let lbas_per_stripe = self.chunksize * m as LbaT;
         let dbi = buf.clone_inaccessible();
         let faulted_children = self.faulted_children();
@@ -822,8 +823,10 @@ impl VdevRaid {
 
         let start_cid = ChunkId::Data(start_lba / self.chunksize);
         let end_lba_remainder = end_lba % lbas_per_stripe;
-        let end_cid = if faulted_children > 0 {
-            ChunkId::Parity(start_lba / self.chunksize, faulted_children)
+        let end_cid = if faulted_children > 0 && faulted_children < f {
+            ChunkId::Parity(stripe_lba / self.chunksize, faulted_children)
+        } else if faulted_children > 0 {
+            ChunkId::Data(end_lba / self.chunksize)
         } else if end_lba_remainder == 0 || (lbas_per_stripe - end_lba_remainder) < self.chunksize {
             ChunkId::Parity(stripe_lba / self.chunksize, 0)
         } else {
@@ -835,7 +838,14 @@ impl VdevRaid {
         .map(|(cid, loc)| {
             let cid_lba = cid.address() * self.chunksize;
             let cid_end_lba = cid_lba + self.chunksize;
-            let (d, disk_lba) = if cid_end_lba <= lba {
+            let (d, disk_lba) = if !cid.is_data() {
+                // Parity chunks are only needed for parity reconstruction
+                debug_assert!(faulted_children > 0);
+                let dbs = DivBufShared::uninitialized(col_len);
+                let dbm = dbs.try_mut().unwrap();
+                exbufs.as_mut().unwrap().push(dbs);
+                (dbm, loc.offset * self.chunksize)
+            } else if cid_end_lba <= lba {
                 // This chunk is only needed for parity reconstruction
                 debug_assert!(faulted_children > 0);
                 let dbs = DivBufShared::uninitialized(col_len);
