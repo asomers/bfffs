@@ -868,7 +868,7 @@ impl VdevRaid {
             } else if cid_lba < lba {
                 // Part of this chunk is needed by the caller
                 debug_assert!(first);
-                first = true;
+                first = false;
                 let chunk_offset = lba % self.chunksize;
                 let disk_lba = loc.offset * self.chunksize + chunk_offset;
                 (data_bufs_iter.next().unwrap(), disk_lba)
