@@ -811,33 +811,14 @@ impl VdevRaid {
             (lba, lba + (buf.len() / BYTES_PER_LBA) as LbaT)
         };
 
-        let data_bufs: Vec<IoVecMut> = if lba % self.chunksize == 0 {
-            buf.into_chunks(col_len).collect()
-        } else {
-            let lbas_into_chunk = lba % self.chunksize;
-            let chunk0lbas = self.chunksize - lbas_into_chunk;
-            let chunk0size = cmp::min(chunk0lbas as usize * BYTES_PER_LBA,
-                                      buf.len());
-            let col0 = buf.split_to(chunk0size);
-            let rest = buf.into_chunks(col_len);
-            Some(col0).into_iter().chain(rest).collect()
-        };
-        debug_assert!(data_bufs.len() <= m);
-
         // If the array is degraded, allocate extra buffers for parity and
         // possibly for normal data too.  The normal data may be needed for
         // reconstruction during reads of less than a full stripe.
         let mut exbufs = if faulted_children > 0 {
-            Some((0..(m - data_bufs.len() - faulted_children as usize))
-                .map(|_| DivBufShared::uninitialized(col_len))
-                .collect::<Vec<_>>())
+            Some(Vec::new())
         } else {
             None
         };
-        let mut exmuts = exbufs.as_mut().map(|exbufs| {
-            exbufs.iter_mut()
-                .map(|dbs| dbs.try_mut().unwrap())
-        });
 
         let start_cid = ChunkId::Data(start_lba / self.chunksize);
         let end_lba_remainder = end_lba % lbas_per_stripe;
@@ -849,18 +830,18 @@ impl VdevRaid {
             ChunkId::Data(div_roundup(end_lba, self.chunksize))
         };
 
-        // TODO: eliminate the ::collect<Vec<_>>() for data_bufs above
-        let mut data_bufs_iter = data_bufs.into_iter();
         let mut first = true;
         self.locator.iter(start_cid, end_cid)
         .map(|(cid, loc)| {
-            dbg!(&cid);
             let cid_lba = cid.address() * self.chunksize;
             let cid_end_lba = cid_lba + self.chunksize;
             let (d, disk_lba) = if cid_end_lba <= lba {
                 // This chunk is only needed for parity reconstruction
                 debug_assert!(faulted_children > 0);
-                (exmuts.as_mut().unwrap().next().unwrap(), loc.offset * self.chunksize)
+                let dbs = DivBufShared::uninitialized(col_len);
+                let dbm = dbs.try_mut().unwrap();
+                exbufs.as_mut().unwrap().push(dbs);
+                (dbm, loc.offset * self.chunksize)
             } else if cid_lba < lba && faulted_children > 0 {
                 // This chunk is needed partly by the caller and partly for
                 // parity reconstruction
@@ -870,14 +851,21 @@ impl VdevRaid {
                 debug_assert!(first);
                 first = false;
                 let chunk_offset = lba % self.chunksize;
+                let chunk0lbas = self.chunksize - chunk_offset;
+                let chunk0size = cmp::min(chunk0lbas as usize * BYTES_PER_LBA,
+                                          buf.len());
+                let col0 = buf.split_to(chunk0size);
                 let disk_lba = loc.offset * self.chunksize + chunk_offset;
-                (data_bufs_iter.next().unwrap(), disk_lba)
+
+                (col0, disk_lba)
             } else if cid_end_lba <= end_lba {
                 // This chunk is needed by the caller
-                (data_bufs_iter.next().unwrap(), loc.offset * self.chunksize)
+                let dbm = buf.split_to(col_len);
+                (dbm, loc.offset * self.chunksize)
             } else if cid_lba < end_lba && faulted_children == 0 {
                 // Part of this chunk is needed by the caller
-                (data_bufs_iter.next().unwrap(), loc.offset * self.chunksize)
+                // TODO: add a DivBufMut::take method
+                (buf.split_to(buf.len()), loc.offset * self.chunksize)
             } else if cid_lba < end_lba {
                 // This chunk is needed partly by the caller and partly for
                 // parity reconstruction
@@ -886,7 +874,10 @@ impl VdevRaid {
                 debug_assert!(cid_lba >= end_lba);
                 // This chunk is only needed for parity reconstruction
                 debug_assert!(faulted_children > 0);
-                (exmuts.as_mut().unwrap().next().unwrap(), loc.offset * self.chunksize)
+                let dbs = DivBufShared::uninitialized(col_len);
+                let dbm = dbs.try_mut().unwrap();
+                exbufs.as_mut().unwrap().push(dbs);
+                (dbm, loc.offset * self.chunksize)
             };
             self.children[loc.disk as usize].read_at(d, disk_lba)
         }).collect::<FuturesOrdered<_>>()
