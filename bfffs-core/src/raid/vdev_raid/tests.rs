@@ -1570,17 +1570,11 @@ mod read_at {
         m1.expect_read_at()
             .times(2)
             .returning(|_, _|  Box::pin( future::ok::<(), Error>(())));
-        m1.expect_readv_at()
-            .once()
-            .returning(|_, _|  Box::pin( future::ok::<(), Error>(())));
 
         let mut m2 = mock_mirror();
         m2.expect_read_at()
             .times(2)
             .returning(|_, _|  Box::pin(future::ok::<(), Error>(())));
-        m2.expect_readv_at()
-            .once()
-            .returning(|_, _|  Box::pin( future::ok::<(), Error>(())));
 
         let mirrors = vec![
             Child::missing(Uuid::new_v4()),

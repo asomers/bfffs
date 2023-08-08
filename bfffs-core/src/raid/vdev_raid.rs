@@ -893,8 +893,12 @@ impl VdevRaid {
         }).collect::<FuturesOrdered<_>>()
         .collect::<Vec<Result<()>>>()
         .then(move |dv| {
-            assert_eq!(faulted_children, 0, "TODO");
-            if dv.iter().all(Result::is_ok) {
+            if faulted_children > 0 {
+                // We should've already read enough parity for reconstruction
+                let data = dbi.try_mut().unwrap();
+                let r = self.read_at_reconstruction(data, lba, exbufs.unwrap(), dv);
+                Box::pin(future::ready(r)) as BoxVdevFut
+            } else if dv.iter().all(Result::is_ok) {
                 Box::pin(future::ok(())) as BoxVdevFut
             } else {
                 let dvs = dv.into_iter().map(Some).collect::<Vec<_>>();
