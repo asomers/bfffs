@@ -914,6 +914,7 @@ impl VdevRaid {
         // LBA where the original operation began
         lba: LbaT,
         exbufs: Vec<DivBufShared>,
+        // The results of the read attempts for each disk in the stripe.
         v: Vec<Result<()>>
     ) -> Result<()>
     {
