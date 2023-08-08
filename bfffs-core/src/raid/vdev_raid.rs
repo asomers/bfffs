@@ -1276,7 +1276,11 @@ impl Vdev for VdevRaid {
     fn lba2zone(&self, lba: LbaT) -> Option<ZoneT> {
         let loc = self.locator.id2loc(ChunkId::Data(lba / self.chunksize));
         let disk_lba = loc.offset * self.chunksize;
-        let tentative = self.children[loc.disk as usize].lba2zone(disk_lba);
+        let child_idx = (0..self.children.len())
+            .map(|i| (loc.disk as usize + i) % self.children.len())
+            .find(|child_idx| self.children[*child_idx].is_present())
+            .unwrap();
+        let tentative = self.children[child_idx].lba2zone(disk_lba);
         tentative?;
         // NB: this call to zone_limits is slow, but unfortunately necessary.
         let limits = self.zone_limits(tentative.unwrap());
