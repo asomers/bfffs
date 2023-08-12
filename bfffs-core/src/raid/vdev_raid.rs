@@ -1022,8 +1022,6 @@ impl VdevRaid {
             let fut = (0..k).map(|_| {
                 let (_, loc) = lociter.next().unwrap();
                 let fut = if lba <= recovery_lba && recovery_lba <= end_lba {
-                    // TODO: at this point, issue reads to data that we don't
-                    // have, when doing a degraded mode read.
                     did += 1;
                     let or = dv[did - 1];
                     if let Some(r) = or {
@@ -1031,10 +1029,9 @@ impl VdevRaid {
                         // reread.
                         Box::pin(future::ready(r)) as BoxVdevFut
                     } else {
+                        // TODO: at this point, issue reads to data that we
+                        // don't have, when doing a degraded mode read.
                         todo!()
-                        //Box::pin(self.children[loc.disk as usize]
-                                 //.read_at(buf, loc.offset * self.chunksize))
-                        
                     }
                 } else {
                     // Read extra data or parity chunks for reconstruction
