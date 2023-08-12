@@ -808,7 +808,7 @@ impl VdevRaid {
     }
 
     /// Read a (possibly improper) subset of one stripe
-    fn read_at_one(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> impl Future<Output=Result<()>>{
+    async fn read_at_one(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> Result<()> {
         let col_len = self.chunksize as usize * BYTES_PER_LBA;
         let f = self.codec.protection();
         let m = (self.codec.stripesize() - f) as usize;
@@ -845,7 +845,7 @@ impl VdevRaid {
         };
 
         let mut first = true;
-        self.locator.iter(start_cid, end_cid)
+        let rfut = self.locator.iter(start_cid, end_cid)
         .map(|(cid, loc)| {
             let cid_lba = cid.address() * self.chunksize;
             let cid_end_lba = cid_lba + self.chunksize;
@@ -901,22 +901,20 @@ impl VdevRaid {
                 (dbm, loc.offset * self.chunksize)
             };
             self.children[loc.disk as usize].read_at(d, disk_lba)
-        }).collect::<FuturesOrdered<_>>()
-        .collect::<Vec<Result<()>>>()
-        .then(move |dv| {
-            if faulted_children > 0 {
-                // We should've already read enough parity for reconstruction
-                let data = dbi.try_mut().unwrap();
-                let r = self.read_at_reconstruction(data, lba, exbufs.unwrap(), dv);
-                Box::pin(future::ready(r)) as BoxVdevFut
-            } else if dv.iter().all(Result::is_ok) {
-                Box::pin(future::ok(())) as BoxVdevFut
-            } else {
-                let dvs = dv.into_iter().map(Some).collect::<Vec<_>>();
-                let data = dbi.try_mut().unwrap();
-                Box::pin(self.read_at_recovery(data, lba, dvs))
-            }
-        })
+        }).collect::<FuturesOrdered<_>>();
+        let dv = rfut.collect::<Vec<Result<()>>>().await;
+
+        if faulted_children > 0 {
+            // We should've already read enough parity for reconstruction
+            let data = dbi.try_mut().unwrap();
+            self.read_at_reconstruction(data, lba, exbufs.unwrap(), dv)
+        } else if dv.iter().all(Result::is_ok) {
+            Ok(())
+        } else {
+            let dvs = dv.into_iter().map(Some).collect::<Vec<_>>();
+            let data = dbi.try_mut().unwrap();
+            self.read_at_recovery(data, lba, dvs).await
+        }
         // TODO: on error, record error statistics, possibly fault a drive,
         // and request the faulty drive's zone to be rebuilt.
     }
