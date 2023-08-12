@@ -671,6 +671,7 @@ impl VdevRaid {
         let lbas = (buf.len() / BYTES_PER_LBA) as LbaT;
         let chunks = div_roundup(buf.len(), col_len);
         let stripes = div_roundup(chunks, m as usize);
+        let faulted_children = self.faulted_children();
 
         // Allocate storage for parity, which we might need to read
         let mut pbufs = (0..f)
@@ -731,13 +732,22 @@ impl VdevRaid {
                     starting = false;
                 }
                 ChunkId::Parity(_did, pid) => {
-                    if sglists[disk].is_empty() {
-                        // Skip this chunk if we aren't already reading a Data
-                        // chunk from an earlier LBA of this disk.
-                        let _ = pmuts[pid as usize].split_to(col_len);
-                    } else {
+                    if faulted_children > pid {
+                        // Read this parity chunk for reconstruction
+                        let col = pmuts[pid as usize].split_to(col_len);
+                        assert!(psglists[disk].is_empty(), "TODO");
+                        sglists[disk].push(col);
+                        if start_lbas[disk] == SENTINEL {
+                            start_lbas[disk] = disk_lba;
+                        }
+                    } else if !sglists[disk].is_empty() {
+                        // Read this parity chunk if we're going to read data
+                        // chunks to either side of it anyway.
                         let col = pmuts[pid as usize].split_to(col_len);
                         psglists[disk].push(col);
+                    } else {
+                        // Skip this uneeded chunk.
+                        let _ = pmuts[pid as usize].split_to(col_len);
                     }
                 }
             }
@@ -782,8 +792,13 @@ impl VdevRaid {
                         .collect::<Vec<_>>();
                     // TODO: make use of any parity chunks that we
                     // opportunistically read.
-                    self.clone()
-                        .read_at_recovery(wbuf.split_to(sbytes), slba, dvs)
+                    let data = wbuf.split_to(sbytes);
+                    //if have_enough_data {
+                        //let r = self.read_at_reconstruction(data, lba, exbufs.unwrap(), dv);
+                    //} else {
+                        self.clone()
+                            .read_at_recovery(data, slba, dvs)
+                    //}
                 }).collect::<FuturesUnordered<_>>()
                 .try_collect::<Vec<_>>()
                 .map_ok(drop);
