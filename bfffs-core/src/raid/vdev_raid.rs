@@ -191,12 +191,8 @@ enum Child {
 cfg_if! {
     if #[cfg(test)] {
         type ChildReadSpacemap = BoxVdevFut;
-        type ChildReadAt = BoxVdevFut;
-        type ChildReadvAt = BoxVdevFut;
     } else {
         type ChildReadSpacemap = mirror::ReadSpacemap;
-        type ChildReadAt = mirror::ReadAt;
-        type ChildReadvAt = mirror::ReadvAt;
     }
 }
 
