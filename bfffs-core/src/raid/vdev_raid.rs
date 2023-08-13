@@ -657,7 +657,7 @@ impl VdevRaid {
     // needed, we will also read Parity chunks if they're bookended by Data
     // chunks.  And we just might need them for reconstruction, if there's an
     // EIO.
-    fn read_at_multi(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> impl Future<Output=Result<()>>
+    async fn read_at_multi(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> Result<()>
     {
         const SENTINEL : LbaT = LbaT::max_value();
 
@@ -753,7 +753,7 @@ impl VdevRaid {
             }
         }
 
-        multizip((self.children.iter(),
+        let rfut = multizip((self.children.iter(),
                               sglists.into_iter(),
                               start_lbas.into_iter()))
         .map(|(mirrordev, sglist, lba)| {
@@ -765,46 +765,38 @@ impl VdevRaid {
         })
         // TODO: on error, record error statistics, possibly fault a drive,
         // and request the faulty drive's zone to be rebuilt.
-        .collect::<FuturesOrdered::<_>>()
-        .collect::<Vec<_>>()
-        .then(move |dv| {
-            if dv.iter().all(Result::is_ok) {
-                Box::pin(future::ok(())) as BoxVdevFut
-            } else {
-                // Split the range into single stripes and perform error
-                // recovery on each.  It isn't the most efficient, but this
-                // should be a rare case.
-                let mut wbuf = dbi.try_mut().unwrap();
-                let start_stripe = lba / (self.chunksize * m as LbaT);
-                let end_lba = lba + ((wbuf.len() - 1) / BYTES_PER_LBA) as LbaT;
-                let past_lba = lba + (wbuf.len() / BYTES_PER_LBA) as LbaT;
-                let end_stripe = end_lba / (self.chunksize * m as LbaT);
-                let lbas_per_stripe = m as LbaT * self.chunksize as LbaT;
-                let fut = (start_stripe..=end_stripe).map(move |s| {
-                    let slba = lba.max(s * lbas_per_stripe);
-                    let elba = past_lba.min((s + 1) * lbas_per_stripe);
-                    let sbytes = (elba - slba) as usize * BYTES_PER_LBA;
-                    let start = ChunkId::Data(slba / self.chunksize);
-                    let end = ChunkId::Data(elba / self.chunksize);
-                    let lociter = self.locator.iter_data(start, end);
-                    let dvs = lociter
-                        .map(|(_cid, loc)| Some(dv[loc.disk as usize]))
-                        .collect::<Vec<_>>();
-                    // TODO: make use of any parity chunks that we
-                    // opportunistically read.
-                    let data = wbuf.split_to(sbytes);
-                    //if have_enough_data {
-                        //let r = self.read_at_reconstruction(data, lba, exbufs.unwrap(), dv);
-                    //} else {
-                        self.clone()
-                            .read_at_recovery(data, slba, dvs)
-                    //}
-                }).collect::<FuturesUnordered<_>>()
-                .try_collect::<Vec<_>>()
-                .map_ok(drop);
-                Box::pin(fut) as BoxVdevFut
-            }
-        })
+        .collect::<FuturesOrdered::<_>>();
+        let dv = rfut.collect::<Vec<_>>().await;
+        if dv.iter().all(Result::is_ok) {
+            Ok(())
+        } else {
+            // Split the range into single stripes and perform error
+            // recovery on each.  It isn't the most efficient, but this
+            // should be a rare case.
+            let mut wbuf = dbi.try_mut().unwrap();
+            let start_stripe = lba / (self.chunksize * m as LbaT);
+            let end_lba = lba + ((wbuf.len() - 1) / BYTES_PER_LBA) as LbaT;
+            let past_lba = lba + (wbuf.len() / BYTES_PER_LBA) as LbaT;
+            let end_stripe = end_lba / (self.chunksize * m as LbaT);
+            let lbas_per_stripe = m as LbaT * self.chunksize as LbaT;
+            (start_stripe..=end_stripe).map(move |s| {
+                let slba = lba.max(s * lbas_per_stripe);
+                let elba = past_lba.min((s + 1) * lbas_per_stripe);
+                let sbytes = (elba - slba) as usize * BYTES_PER_LBA;
+                let start = ChunkId::Data(slba / self.chunksize);
+                let end = ChunkId::Data(elba / self.chunksize);
+                let lociter = self.locator.iter_data(start, end);
+                let dvs = lociter
+                    .map(|(_cid, loc)| Some(dv[loc.disk as usize]))
+                    .collect::<Vec<_>>();
+                // TODO: make use of any parity chunks that we
+                // opportunistically read.
+                let data = wbuf.split_to(sbytes);
+                self.clone().read_at_recovery(data, slba, dvs)
+            }).collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>()
+            .map_ok(drop).await
+        }
     }
 
     /// Read a (possibly improper) subset of one stripe
