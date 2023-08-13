@@ -903,10 +903,10 @@ impl VdevRaid {
         let mut old_nerrs = faulted_children;
         loop {
             nerrs = dv.iter().filter(|x| x.is_err()).count() as i16;
-            let nok = dv.len() as i16 - nerrs;
-            if nok >= m as i16 || nerrs == 0 {
+            if nerrs <= old_nerrs {
                 break;
             }
+            debug_assert!(dv.len() - (nerrs as usize) < m);
             // Some disk must've had an unexpected error.  Read enough parity
             // for reconstruction.
             if nerrs > f {
