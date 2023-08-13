@@ -815,11 +815,12 @@ impl VdevRaid {
         let lbas_per_stripe = self.chunksize * m as LbaT;
         let dbi = buf.clone_inaccessible();
         let faulted_children = self.faulted_children();
-        let mut nerrs = faulted_children;
+        let mut nerrs;
 
         let stripe_lba = lba - lba % lbas_per_stripe;
+        let end_of_stripe_lba = stripe_lba + lbas_per_stripe;
         let (start_lba, end_lba) = if faulted_children > 0 {
-            (stripe_lba, stripe_lba + lbas_per_stripe)
+            (stripe_lba, end_of_stripe_lba)
         } else {
             (lba, lba + (buf.len() / BYTES_PER_LBA) as LbaT)
         };
@@ -833,7 +834,7 @@ impl VdevRaid {
             None
         };
 
-        let start_chunk_addr = start_lba / self.chunksize;
+        let mut start_chunk_addr = start_lba / self.chunksize;
         let start_cid = ChunkId::Data(start_chunk_addr);
         let end_lba_remainder = end_lba % lbas_per_stripe;
         let end_cid = if faulted_children > 0 && faulted_children < f {
@@ -906,11 +907,15 @@ impl VdevRaid {
         }).collect::<FuturesOrdered<_>>();
         let mut dv = rfut.collect::<Vec<Result<()>>>().await;
 
-        while dv.iter().filter(|x| x.is_ok()).count() < m {
+        let mut old_nerrs = faulted_children;
+        loop {
+            nerrs = dv.iter().filter(|x| x.is_err()).count() as i16;
+            let nok = dv.len() as i16 - nerrs;
+            if nok >= m as i16 || nerrs == 0 {
+                break;
+            }
             // Some disk must've had an unexpected error.  Read enough parity
             // for reconstruction.
-            let old_nerrs = (dv.len() - m) as i16;
-            nerrs = dv.iter().filter(|x| x.is_err()).count() as i16;
             if nerrs > f {
                 // Too many errors.  No point in attempting recovery. :(
                 break
@@ -918,11 +923,11 @@ impl VdevRaid {
             if exbufs.is_none() {
                 exbufs = Some(Vec::with_capacity(nerrs as usize));
             }
-            assert_eq!(start_lba, stripe_lba, "TODO");
+            let start_cid = ChunkId::Data(stripe_lba / self.chunksize);
             let end_cid = if nerrs > 0 && nerrs < f {
                 ChunkId::Parity(stripe_lba / self.chunksize, nerrs)
             } else {
-                ChunkId::Data(end_lba / self.chunksize)
+                ChunkId::Data(end_of_stripe_lba / self.chunksize)
             };
             let rfut = self.locator.iter(start_cid, end_cid)
             .map(|(cid, loc)| {
@@ -939,12 +944,28 @@ impl VdevRaid {
                         let disk_lba = loc.offset * self.chunksize;
                         Box::pin(self.children[loc.disk as usize].read_at(dbm, disk_lba)) as BoxVdevFut
                     }
-                } else {
+                } else if cid.address() < start_chunk_addr {
+                    // Need to read this data chunk for parity reconstruction
+                    let dbs = DivBufShared::uninitialized(col_len);
+                    let dbm = dbs.try_mut().unwrap();
+                    exbufs.as_mut().unwrap().push(dbs);
+                    let disk_lba = loc.offset * self.chunksize;
+                    Box::pin(self.children[loc.disk as usize].read_at(dbm, disk_lba)) as BoxVdevFut
+                } else if cid.address() - start_chunk_addr < dv.len() as u64 {
                     // should've already read it
                     let dvidx = (cid.address() - start_chunk_addr) as usize;
-                    Box::pin(future::ready(dv[dvidx]))
+                    Box::pin(future::ready(dv[dvidx])) as BoxVdevFut
+                } else {
+                    // Need to read this data chunk for parity reconstruction
+                    let dbs = DivBufShared::uninitialized(col_len);
+                    let dbm = dbs.try_mut().unwrap();
+                    exbufs.as_mut().unwrap().push(dbs);
+                    let disk_lba = loc.offset * self.chunksize;
+                    Box::pin(self.children[loc.disk as usize].read_at(dbm, disk_lba)) as BoxVdevFut
                 }
             }).collect::<FuturesOrdered<_>>();
+            start_chunk_addr = stripe_lba / self.chunksize;
+            old_nerrs = nerrs;
             dv = rfut.collect::<Vec<Result<()>>>().await;
         }
 
