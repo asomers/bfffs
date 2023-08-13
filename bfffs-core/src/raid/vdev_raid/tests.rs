@@ -1599,6 +1599,46 @@ mod read_at {
         }
     }
 
+    #[test]
+    fn one_stripe_unaligned_degraded() {
+        let k = 3;
+        let f = 1;
+        let m = k - f;
+        const CHUNKSIZE : LbaT = 2;
+
+        let mut m1 = mock_mirror();
+        m1.expect_readv_at()
+            .times(2)
+            .returning(|_, _|  Box::pin( future::ok::<(), Error>(())));
+
+        let mut m2 = mock_mirror();
+        m2.expect_readv_at()
+            .times(2)
+            .returning(|_, _|  Box::pin(future::ok::<(), Error>(())));
+
+        let mirrors = vec![
+            Child::missing(Uuid::new_v4()),
+            Child::present(m1),
+            Child::present(m2)
+        ];
+
+        let vdev_raid = Arc::new(
+            VdevRaid::new(CHUNKSIZE, k, f, Uuid::new_v4(),
+                          LayoutAlgorithm::PrimeS, mirrors.into_boxed_slice())
+        );
+        // Read two stripes to ensure that the missing device should be included
+        // in one.  But read one at a time.
+        let zl = vdev_raid.zone_limits(0);
+        let rlen = CHUNKSIZE as usize * BYTES_PER_LBA * m as usize;
+        let dbs = DivBufShared::from(vec![0u8; rlen]);
+        for i in 0..2 {
+            let rbuf = dbs.try_mut().unwrap();
+            let ofs = zl.0 + CHUNKSIZE * m as u64 / 2 + i * rlen as u64;
+            vdev_raid.clone().read_at(rbuf, ofs)
+                .now_or_never().unwrap().unwrap();
+        }
+    }
+
     // Use mock Mirror objects to test that RAID reads hit the right LBAs from
     // the individual disks.  Ignore the actual data values, since we don't have
     // real Mirrors.  Functional testing will verify the data.
