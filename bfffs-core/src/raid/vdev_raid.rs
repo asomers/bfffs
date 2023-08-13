@@ -815,6 +815,7 @@ impl VdevRaid {
         let lbas_per_stripe = self.chunksize * m as LbaT;
         let dbi = buf.clone_inaccessible();
         let faulted_children = self.faulted_children();
+        let mut nerrs = faulted_children;
 
         let stripe_lba = lba - lba % lbas_per_stripe;
         let (start_lba, end_lba) = if faulted_children > 0 {
@@ -832,7 +833,8 @@ impl VdevRaid {
             None
         };
 
-        let start_cid = ChunkId::Data(start_lba / self.chunksize);
+        let start_chunk_addr = start_lba / self.chunksize;
+        let start_cid = ChunkId::Data(start_chunk_addr);
         let end_lba_remainder = end_lba % lbas_per_stripe;
         let end_cid = if faulted_children > 0 && faulted_children < f {
             ChunkId::Parity(stripe_lba / self.chunksize, faulted_children)
@@ -902,18 +904,62 @@ impl VdevRaid {
             };
             self.children[loc.disk as usize].read_at(d, disk_lba)
         }).collect::<FuturesOrdered<_>>();
-        let dv = rfut.collect::<Vec<Result<()>>>().await;
+        let mut dv = rfut.collect::<Vec<Result<()>>>().await;
 
-        if faulted_children > 0 {
-            // We should've already read enough parity for reconstruction
+        while dv.iter().filter(|x| x.is_ok()).count() < m {
+            // Some disk must've had an unexpected error.  Read enough parity
+            // for reconstruction.
+            let old_nerrs = (dv.len() - m) as i16;
+            nerrs = dv.iter().filter(|x| x.is_err()).count() as i16;
+            if nerrs > f {
+                // Too many errors.  No point in attempting recovery. :(
+                break
+            }
+            if exbufs.is_none() {
+                exbufs = Some(Vec::with_capacity(nerrs as usize));
+            }
+            assert_eq!(start_lba, stripe_lba, "TODO");
+            let end_cid = if nerrs > 0 && nerrs < f {
+                ChunkId::Parity(stripe_lba / self.chunksize, nerrs)
+            } else {
+                ChunkId::Data(end_lba / self.chunksize)
+            };
+            let rfut = self.locator.iter(start_cid, end_cid)
+            .map(|(cid, loc)| {
+                if let ChunkId::Parity(_, pid) = cid {
+                    debug_assert!(pid < nerrs);
+                    if pid < old_nerrs {
+                        // Already read it
+                        let dvidx = m + pid as usize;
+                        Box::pin(future::ready(dv[dvidx])) as BoxVdevFut
+                    } else {
+                        let dbs = DivBufShared::uninitialized(col_len);
+                        let dbm = dbs.try_mut().unwrap();
+                        exbufs.as_mut().unwrap().push(dbs);
+                        let disk_lba = loc.offset * self.chunksize;
+                        Box::pin(self.children[loc.disk as usize].read_at(dbm, disk_lba)) as BoxVdevFut
+                    }
+                } else {
+                    // should've already read it
+                    let dvidx = (cid.address() - start_chunk_addr) as usize;
+                    Box::pin(future::ready(dv[dvidx]))
+                }
+            }).collect::<FuturesOrdered<_>>();
+            dv = rfut.collect::<Vec<Result<()>>>().await;
+        }
+
+        if nerrs > f {
+            // Reconstruction is impossible :(
+            dv.into_iter()
+                .find(Result::is_err)
+                .unwrap()
+        } else if nerrs > 0 {
+            // We must reconstruct the data
+            drop(buf);
             let data = dbi.try_mut().unwrap();
             self.read_at_reconstruction(data, lba, exbufs.unwrap(), dv)
-        } else if dv.iter().all(Result::is_ok) {
+        } else  {
             Ok(())
-        } else {
-            let dvs = dv.into_iter().map(Some).collect::<Vec<_>>();
-            let data = dbi.try_mut().unwrap();
-            self.read_at_recovery(data, lba, dvs).await
         }
         // TODO: on error, record error statistics, possibly fault a drive,
         // and request the faulty drive's zone to be rebuilt.
@@ -981,7 +1027,7 @@ impl VdevRaid {
             // TODO: re-write the offending sector for READ UNRECOVERABLE
         } else {
             let r = v.iter()
-                .find(|r| matches!(r, Err(_)))
+                .find(|r| r.is_err())
                 .unwrap();
             Err(r.unwrap_err())
         }
