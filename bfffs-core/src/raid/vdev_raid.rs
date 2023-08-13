@@ -773,6 +773,7 @@ impl VdevRaid {
             // Split the range into single stripes and perform error
             // recovery on each.  It isn't the most efficient, but this
             // should be a rare case.
+            drop(buf);
             let mut wbuf = dbi.try_mut().unwrap();
             let start_stripe = lba / (self.chunksize * m as LbaT);
             let end_lba = lba + ((wbuf.len() - 1) / BYTES_PER_LBA) as LbaT;
