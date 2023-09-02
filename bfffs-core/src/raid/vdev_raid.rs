@@ -258,7 +258,11 @@ impl Child {
     }
 
     fn write_at(&self, buf: IoVec, lba: LbaT) -> BoxVdevFut {
-        self.as_present().unwrap().write_at(buf, lba)
+        if let Child::Present(c) = self {
+            Box::pin(c.write_at(buf, lba)) as BoxVdevFut
+        } else {
+            Box::pin(future::err(Error::ENXIO)) as BoxVdevFut
+        }
     }
 
     fn write_label(&self, labeller: LabelWriter) -> BoxVdevFut {
@@ -1321,13 +1325,21 @@ impl VdevRaid {
         // TODO: on error, record error statistics, and possibly fault a drive.
         Box::pin(
             future::join(data_fut, parity_fut)
-            .map(|(dv, pv)|
-                 dv.iter()
-                 .chain(pv.iter())
-                 .find(|r| r.is_err())
-                 .cloned()
-                 .unwrap_or(Ok(()))
-            )
+            .map(move |(dv, pv)| {
+                let mut r = Ok(());
+                let mut nerrs = 0;
+                let dpvi = dv.into_iter().chain(pv.into_iter());
+                for e in dpvi.filter(Result::is_err) {
+                    // As long as we wrote enough disks to make the data
+                    // recoverable, consider it successful.
+                    nerrs += 1;
+                    if nerrs > f {
+                        r = e;
+                        break
+                    }
+                }
+                r
+            })
         )
     }
 
