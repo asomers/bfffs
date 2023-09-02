@@ -412,9 +412,9 @@ pub struct VdevRaid {
 /// ```no_run
 /// let v = Vec::<IoVec>::with_capacity(4);
 /// let lba = 0;
-/// let fut = issue_1stripe_ops!(self, v, lba, false, write_at)
+/// let fut = issue_1stripe_writes!(self, v, lba, false, write_at)
 /// ```
-macro_rules! issue_1stripe_ops {
+macro_rules! issue_1stripe_writes {
     ( $self:ident, $buf:expr, $lba:expr, $parity:expr, $func:ident) => {
         {
             let (start, end) = if $parity {
@@ -1316,8 +1316,8 @@ impl VdevRaid {
                 dbs.try_const().unwrap()
             });
 
-        let data_fut = issue_1stripe_ops!(self, dcols, lba, false, write_at);
-        let parity_fut = issue_1stripe_ops!(self, pw, lba, true, write_at);
+        let data_fut = issue_1stripe_writes!(self, dcols, lba, false, write_at);
+        let parity_fut = issue_1stripe_writes!(self, pw, lba, true, write_at);
         // TODO: on error, record error statistics, and possibly fault a drive.
         Box::pin(
             future::join(data_fut, parity_fut)
@@ -1376,8 +1376,8 @@ impl VdevRaid {
                 dbs.try_const().unwrap()
             });
 
-        let data_fut = issue_1stripe_ops!(self, dcols, lba, false, writev_at);
-        let parity_fut = issue_1stripe_ops!(self, pw, lba, true, write_at);
+        let data_fut = issue_1stripe_writes!(self, dcols, lba, false, writev_at);
+        let parity_fut = issue_1stripe_writes!(self, pw, lba, true, write_at);
         // TODO: on error, record error statistics, and possibly fault a drive.
         Box::pin(
             future::join(data_fut, parity_fut)
