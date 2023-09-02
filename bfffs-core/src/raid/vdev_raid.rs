@@ -657,7 +657,12 @@ impl VdevRaid {
     // needed, we will also read Parity chunks if they're bookended by Data
     // chunks.  And we just might need them for reconstruction, if there's an
     // EIO.
-    async fn read_at_multi(self: Arc<Self>, mut buf: IoVecMut, lba: LbaT) -> Result<()>
+    async fn read_at_multi(
+        self: Arc<Self>,
+        mut buf: IoVecMut,
+        // First LBA the user wants to read
+        ulba: LbaT
+    ) -> Result<()>
     {
         const SENTINEL : LbaT = LbaT::max_value();
 
@@ -667,30 +672,34 @@ impl VdevRaid {
         let k = self.codec.stripesize();
         let m = k - f;
         let lbas_per_stripe = self.chunksize * m as LbaT;
-        debug_assert_eq!(buf.len() % BYTES_PER_LBA, 0);
-        let lbas = (buf.len() / BYTES_PER_LBA) as LbaT;
-        let chunks = div_roundup(buf.len(), col_len);
         let faulted_children = self.faulted_children();
-        let start_stripe = lba / (self.chunksize * m as LbaT);
-        let past_lba = lba + lbas;   // First LBA past end of the operation
-        let end_lba = lba + lbas - 1;
-        let past_stripe = past_lba / (self.chunksize * m as LbaT);
-        let end_stripe = end_lba / (self.chunksize * m as LbaT);
-        let stripes = (end_stripe - start_stripe + 1) as usize;
 
-        let stripe_lba = lba - lba % lbas_per_stripe;
-        let start_lba = if faulted_children > 0 {
+        debug_assert_eq!(buf.len() % BYTES_PER_LBA, 0);
+        let unlbas = (buf.len() / BYTES_PER_LBA) as LbaT;
+        let uchunks = div_roundup(buf.len(), col_len);
+        let start_stripe = ulba / (self.chunksize * m as LbaT);
+        // First LBA that the user does not want to read
+        let uelba = ulba + unlbas;
+        // The last stripe that the user wants to read from
+        let last_stripe = (uelba - 1) / (self.chunksize * m as LbaT);
+        let last_stripe_lba = last_stripe % lbas_per_stripe;
+        // The number of stripes to read, at least partially
+        let nstripes = (last_stripe - start_stripe + 1) as usize;
+
+        let stripe_lba = ulba - ulba % lbas_per_stripe;
+        // First LBA that we'll read from disk
+        let rlba = if faulted_children > 0 {
             stripe_lba
         } else {
-            lba
+            ulba
         };
 
         // Allocate extra buffers for parity and possibly for normal data too.
         // The normal data may be needed for reconstruction during reads of less
         // than a full stripe.  The parity may be needed for reconstruction, and
         // may also be opportunistically read just to reduce disk IOPs.
-        let mut exbufs = Vec::with_capacity(stripes);
-        exbufs.resize_with(stripes, || Vec::with_capacity(f as usize));
+        let mut exbufs = Vec::with_capacity(nstripes);
+        exbufs.resize_with(nstripes, || Vec::with_capacity(f as usize));
 
         // Store DivBufInaccessible for use during error recovery
         let dbi = buf.clone_inaccessible();
@@ -700,67 +709,70 @@ impl VdevRaid {
         // Create additional SGLists to store Parity buffers, if we need them.
         let mut psglists = Vec::<SGListMut>::new();
         psglists.resize_with(n, Default::default);
+        // The disk LBAs (not RAID LBAs) that each disk read starts from
         let mut start_lbas : Vec<LbaT> = vec![SENTINEL; n];
-        let max_chunks_per_disk = self.locator.parallel_read_count(chunks);
+        let max_chunks_per_disk = self.locator.parallel_read_count(uchunks);
         for _ in 0..n {
             // Size each SGList to the maximum possible size
             sglists.push(SGListMut::with_capacity(max_chunks_per_disk));
         }
         // Build the SGLists, one chunk at a time
-        let mut start_chunk_addr = start_lba / self.chunksize;
+        let start_chunk_addr = rlba / self.chunksize;
         let start_cid = ChunkId::Data(start_chunk_addr);
-        let at_end_of_stripe = past_lba % lbas_per_stripe >
+        let at_end_of_stripe = uelba % lbas_per_stripe >
             lbas_per_stripe - self.chunksize;
-        let end = if at_end_of_stripe {
-            let end_chunk = past_lba / self.chunksize;
-            ChunkId::Parity(end_chunk - end_chunk % m as LbaT, 0)
+        let end_cid = if faulted_children > 0 || at_end_of_stripe {
+            if faulted_children < f {
+                ChunkId::Parity(last_stripe_lba, faulted_children)
+            } else {
+                ChunkId::Data((last_stripe + 1) * m as u64)
+            }
         } else {
-            ChunkId::Data(div_roundup(lba + lbas, self.chunksize))
+            ChunkId::Data(div_roundup(uelba, self.chunksize))
         };
-        dbg!(start_cid, end);
         let mut starting = true;
-        for (cid, loc) in self.locator.iter(start_cid, end) {
-            let mut disk_lba = loc.offset * self.chunksize;
+        for (cid, loc) in self.locator.iter(start_cid, end_cid) {
+            let disk_lba = loc.offset * self.chunksize;
             let disk = loc.disk as usize;
             let cid_lba = cid.address() * self.chunksize;
             let cid_end_lba = cid_lba + self.chunksize;
             let stripe = (cid.address() - start_chunk_addr) as usize / m as usize;
             match cid {
                 ChunkId::Data(_did) => {
-                    let col = if cid_end_lba <= lba {
+                    let col = if cid_end_lba <= ulba {
                         // This chunk is only needed for parity reconstruction
                         debug_assert!(faulted_children > 0);
                         let dbs = DivBufShared::uninitialized(col_len);
                         let dbm = dbs.try_mut().unwrap();
                         exbufs[stripe].push(dbs);
                         dbm
-                    } else if cid_lba < lba && faulted_children > 0 {
+                    } else if cid_lba < ulba && faulted_children > 0 {
                         // This chunk is needed partly by the caller and partly
                         // for parity reconstruction
                         todo!()
-                    } else if cid_lba < lba {
+                    } else if cid_lba < ulba {
                         // Part of this chunk is needed by the caller
                         debug_assert!(starting);
-                        let chunk_offset = lba % self.chunksize;
+                        let chunk_offset = ulba % self.chunksize;
                         let chunk0lbas = self.chunksize - chunk_offset;
                         let chunk0size = cmp::min(chunk0lbas as usize * BYTES_PER_LBA,
                                                   buf.len());
                         let col0 = buf.split_to(chunk0size);
                         col0
-                    } else if cid_end_lba <= past_lba {
+                    } else if cid_end_lba <= uelba {
                         // This chunk is needed by the caller
                         let dbm = buf.split_to(col_len);
                         dbm
-                    } else if cid_lba < past_lba && faulted_children == 0 {
+                    } else if cid_lba < uelba && faulted_children == 0 {
                         // Part of this chunk is needed by the caller
                         // TODO: add a DivBufMut::take method
                         buf.split_to(buf.len())
-                    } else if cid_lba < past_lba {
+                    } else if cid_lba < uelba {
                         // This chunk is needed partly by the caller and partly
                         // for parity reconstruction
                         todo!()
                     } else {
-                        debug_assert!(cid_lba >= past_lba);
+                        debug_assert!(cid_lba >= uelba);
                         // This chunk is only needed for parity reconstruction
                         debug_assert!(faulted_children > 0);
                         let dbs = DivBufShared::uninitialized(col_len);
@@ -796,7 +808,6 @@ impl VdevRaid {
                         psglists[disk].push(dbm);
                     } else {
                         // Skip this uneeded chunk.
-                        eprintln!("Skipping an unneeded chunk");
                     }
                 }
             }
@@ -817,26 +828,7 @@ impl VdevRaid {
         .collect::<FuturesOrdered::<_>>();
         let dv = rfut.collect::<Vec<_>>().await;
 
-        dbg!(&dv);
         // TODO: on error, issue extra parity reads.
-
-        //let mut old_nerrs = faulted_children;
-        //let mut nerrs;
-        //loop {
-            //nerrs = dv.iter().filter(|x| x.is_err()).count() as i16;
-            //if nerrs <= old_nerrs {
-                //break;
-            //}
-            //// Some disk must've had an unexpected error.  Read enough parity
-            //// for reconstruction.
-            //if nerrs > f {
-                //// Too many errors.  No point in attempting recovery. :(
-                //break
-            //}
-            //if exbufs.is_none() {
-                //exbufs = Some(Vec::with_capacity(nerrs as usize));
-            //}
-        //}
 
         if dv.iter().all(Result::is_ok) {
             Ok(())
@@ -845,28 +837,30 @@ impl VdevRaid {
             // recovery on each.  It isn't the most efficient, but this
             // should be a rare case.
             drop(buf);
-            let mut wbuf = dbi.try_mut().unwrap();
+            let mut rbuf = dbi.try_mut().unwrap();
             let lbas_per_stripe = m as LbaT * self.chunksize as LbaT;
             let mut exbufs = exbufs.into_iter();
-            (start_stripe..=end_stripe).map(move |s| {
-                let slba = lba.max(s * lbas_per_stripe);
-                let elba = past_lba.min((s + 1) * lbas_per_stripe);
-                let sbytes = (elba - slba) as usize * BYTES_PER_LBA;
-                let start = ChunkId::Data(slba / self.chunksize);
-                let end = ChunkId::Data(elba / self.chunksize);
-                let lociter = self.locator.iter(start, end);
+            (start_stripe..=last_stripe).map(move |s| {
+                // Start of user data within this stripe
+                let usslba = ulba.max(s * lbas_per_stripe);
+                // End of user data within this stripe
+                let uselba = uelba.min((s + 1) * lbas_per_stripe);
+                let sbytes = (uselba - usslba) as usize * BYTES_PER_LBA;
+                let start_cid = ChunkId::Data(s * m as u64);
+                let end_cid = if faulted_children < f {
+                    ChunkId::Parity(s * m as u64, faulted_children)
+                } else {
+                    ChunkId::Data((s + 1) * m as u64)
+                };
+                //let end = ChunkId::Data(elba / self.chunksize);
+                let lociter = self.locator.iter(start_cid, end_cid);
                 let dvs = lociter
                     .map(|(_cid, loc)| dv[loc.disk as usize])
                     .collect::<Vec<_>>();
-                // TODO: make use of any parity chunks that we
-                // opportunistically read.
-                let data = wbuf.split_to(sbytes);
-                dbg!(&dvs);
-                self.clone().read_at_reconstruction(data, slba, exbufs.next().unwrap(), dvs)
-                //self.clone().read_at_recovery(data, slba, dvs)
+                let data = rbuf.split_to(sbytes);
+                self.clone().read_at_reconstruction(data, usslba, exbufs.next().unwrap(), dvs)
             }).reduce(|acc, e| acc.and(e))
             .unwrap()
-            //.map_ok(drop)
         }
     }
 
@@ -1076,12 +1070,10 @@ impl VdevRaid {
         let mut container = Vec::with_capacity(k);
         let mut excols = exbufs.into_iter()
             .map(|dbs| dbs.try_mut().unwrap());
-        dbg!(v.len(), data.len() / col_len, excols.len());
         let mut dcols = data.into_chunks(col_len);
         for (i, r) in v.iter().enumerate().take(k) {
             let stripe_offset = lba % (m as LbaT * self.chunksize);
             let recovery_lba = lba - stripe_offset + i as LbaT * self.chunksize;
-            dbg!(lba, recovery_lba, end_lba);
             let mut col = if lba <= recovery_lba && recovery_lba <= end_lba
             {
                 dcols.next().unwrap()

@@ -1624,10 +1624,11 @@ mod read_at {
         // in one.  But read one at a time.
         let zl = vdev_raid.zone_limits(0);
         let rlen = CHUNKSIZE as usize * BYTES_PER_LBA * m as usize;
+        let lbas_per_stripe = m as LbaT * CHUNKSIZE as LbaT;
         let dbs = DivBufShared::from(vec![0u8; rlen]);
         for i in 0..2 {
             let rbuf = dbs.try_mut().unwrap();
-            let ofs = zl.0 + CHUNKSIZE * m as u64 / 2 + i * rlen as u64;
+            let ofs = zl.0 + CHUNKSIZE * m as u64 / 2 + i * lbas_per_stripe;
             vdev_raid.clone().read_at(rbuf, ofs)
                 .now_or_never().unwrap().unwrap();
         }
