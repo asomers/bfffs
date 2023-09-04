@@ -276,7 +276,11 @@ impl Child {
     }
 
     fn writev_at(&self, bufs: SGList, lba: LbaT) -> BoxVdevFut {
-        self.as_present().unwrap().writev_at(bufs, lba)
+        if let Child::Present(c) = self {
+            Box::pin(c.writev_at(bufs, lba)) as BoxVdevFut
+        } else {
+            Box::pin(future::err(Error::ENXIO)) as BoxVdevFut
+        }
     }
 
     fn lba2zone(&self, lba: LbaT) -> Option<ZoneT> {
