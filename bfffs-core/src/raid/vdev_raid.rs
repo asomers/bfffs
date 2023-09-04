@@ -1410,13 +1410,21 @@ impl VdevRaid {
         // TODO: on error, record error statistics, and possibly fault a drive.
         Box::pin(
             future::join(data_fut, parity_fut)
-            .map(|(dv, pv)|
-                 dv.iter()
-                 .chain(pv.iter())
-                 .find(|r| r.is_err())
-                 .cloned()
-                 .unwrap_or(Ok(()))
-            )
+            .map(move |(dv, pv)| {
+                let mut r = Ok(());
+                let mut nerrs = 0;
+                let dpvi = dv.into_iter().chain(pv.into_iter());
+                for e in dpvi.filter(Result::is_err) {
+                    // As long as we wrote enough disks to make the data
+                    // recoverable, consider it successful.
+                    nerrs += 1;
+                    if nerrs > f {
+                        r = e;
+                        break
+                    }
+                }
+                r
+            })
         )
     }
 }
