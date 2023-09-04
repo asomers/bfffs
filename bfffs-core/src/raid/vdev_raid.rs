@@ -1282,8 +1282,21 @@ impl VdevRaid {
         .filter(|&(_, _, lba)| lba != SENTINEL)
         .map(|(mirrordev, sglist, lba)| mirrordev.writev_at(sglist, lba))
         .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>()
-        .map_ok(drop);
+        .collect::<Vec<_>>()
+        .map(move |dv| {
+            let mut r = Ok(());
+            let mut nerrs = 0;
+            for e in dv.into_iter().filter(Result::is_err) {
+                // As long as we wrote enough disks to make the data
+                // recoverable, consider it successful.
+                nerrs += 1;
+                if nerrs > f {
+                    r = e;
+                    break
+                }
+            }
+            r
+        });
         Box::pin(fut)
         // TODO: on error, record error statistics, possibly fault a drive,
         // request the faulty drive's zone to be rebuilt, and read parity to
