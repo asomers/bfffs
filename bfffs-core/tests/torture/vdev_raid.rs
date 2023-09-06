@@ -11,7 +11,6 @@ use std::{
 
 use std::os::unix::fs::FileExt;
 use divbuf::DivBufShared;
-use pretty_assertions::assert_eq;
 use rand::{
     Rng,
     RngCore,
@@ -80,6 +79,17 @@ async fn do_test(
     f: i16,
     seed: Option<[u8; 16]>)
 {
+    // XXX BUG: can't create it both here and in tests/torture/fs.rs
+    use tracing_subscriber::EnvFilter;
+    use std::sync::Once;
+    static TRACINGSUBSCRIBER: Once = Once::new();
+    TRACINGSUBSCRIBER.call_once(|| {
+        tracing_subscriber::fmt()
+            .pretty()
+            .with_env_filter(EnvFilter::from_default_env())
+            .init();
+    });
+
     let file_size: usize = ((2<<20) as f64 * crate::test_scale()) as usize;
     // A maximum write of 4 stripes should hit every special case in vdev_raid
     let max_write_lbas = 4 * chunksize * (k - f) as LbaT;
@@ -104,6 +114,7 @@ async fn do_test(
     while nwritten < file_size {
         let write_lbas: LbaT = rng.gen_range(1..=max_write_lbas);
         let write_bytes = write_lbas as usize * BYTES_PER_LBA;
+        tracing::debug!("Writing {write_bytes} at {ofs}");
         let dbs = DivBufShared::from(mkbuf(ofs, write_bytes));
         let wbuf = dbs.try_const().unwrap();
         assert!(ofs + write_lbas < zl.1, "This test is not yet zone-aware");
@@ -120,6 +131,7 @@ async fn do_test(
     while nread < nwritten {
         let read_lbas: LbaT = rng.gen_range(1..=max_write_lbas);
         let read_bytes = (nwritten - nread).min(read_lbas as usize * BYTES_PER_LBA);
+        tracing::debug!("Reading {read_bytes} at {ofs}");
         let expect_buf = mkbuf(ofs, read_bytes);
         let dbs = DivBufShared::from(vec![0u8; read_bytes]);
         let rbuf = dbs.try_mut().unwrap();
