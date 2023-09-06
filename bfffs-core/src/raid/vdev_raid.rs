@@ -756,8 +756,14 @@ impl VdevRaid {
                         dbm
                     } else if cid_lba < ulba && faulted_children > 0 {
                         // This chunk is needed partly by the caller and partly
-                        // for parity reconstruction
-                        todo!()
+                        // for parity reconstruction.  Only the exbuf is big
+                        // enough for the whole chunk, so read it there for now.
+                        // Copy the relevant part back to the user buf later,
+                        // during reconstruction.
+                        let dbs = DivBufShared::uninitialized(col_len);
+                        let dbm = dbs.try_mut().unwrap();
+                        exbufs[stripe].push(dbs);
+                        dbm
                     } else if cid_lba < ulba {
                         // Part of this chunk is needed by the caller
                         debug_assert!(starting);
@@ -777,8 +783,14 @@ impl VdevRaid {
                         buf.split_to(buf.len())
                     } else if cid_lba < uelba {
                         // This chunk is needed partly by the caller and partly
-                        // for parity reconstruction
-                        todo!()
+                        // for parity reconstruction.  Only the exbuf is big
+                        // enough for the whole chunk, so read it there for now.
+                        // Copy the relevant part back to the user buf later,
+                        // during reconstruction.
+                        let dbs = DivBufShared::uninitialized(col_len);
+                        let dbm = dbs.try_mut().unwrap();
+                        exbufs[stripe].push(dbs);
+                        dbm
                     } else {
                         debug_assert!(cid_lba >= uelba);
                         // This chunk is only needed for parity reconstruction
@@ -854,6 +866,17 @@ impl VdevRaid {
                 // End of user data within this stripe
                 let uselba = uelba.min((s + 1) * lbas_per_stripe);
                 let sbytes = (uselba - usslba) as usize * BYTES_PER_LBA;
+                let data = rbuf.split_to(sbytes);
+                let exbuf = exbufs.next().unwrap();
+                if uselba % self.chunksize > 0 {
+                    eprintln!("TODO: {}",uselba % self.chunksize);
+                    // We must copy some data back from the parity buffer
+                    // into the user buffer.
+                    //let cbytes = (uselba % self.chunksize) as usize * BYTES_PER_LBA;
+                    //let o = ((uselba - uselba % self.chunksize) - usslba) as usize * BYTES_PER_LBA;
+                    //data[o..o + cbytes] = exbuf[0..cbytes];
+                }
+                dbg!(usslba, uselba);
                 let start_cid = ChunkId::Data(s * m as u64);
                 let end_cid = if faulted_children < f {
                     ChunkId::Parity(s * m as u64, faulted_children)
@@ -865,8 +888,7 @@ impl VdevRaid {
                 let dvs = lociter
                     .map(|(_cid, loc)| dv[loc.disk as usize])
                     .collect::<Vec<_>>();
-                let data = rbuf.split_to(sbytes);
-                self.clone().read_at_reconstruction(data, usslba, exbufs.next().unwrap(), dvs)
+                self.clone().read_at_reconstruction(data, usslba, exbuf, dvs)
             }).reduce(|acc, e| acc.and(e))
             .unwrap()
         }
@@ -1055,7 +1077,7 @@ impl VdevRaid {
     fn read_at_reconstruction(
         &self,
         // Handle to the original buffer
-        data: DivBufMut,
+        mut data: DivBufMut,
         // LBA where the original operation began
         lba: LbaT,
         // Buffers of extra chunks needed only for reconstruction.  They are
@@ -1070,7 +1092,7 @@ impl VdevRaid {
         let k = self.codec.stripesize() as usize;
         let m = k - f;
         let col_len = self.chunksize as usize * BYTES_PER_LBA;
-        let end_lba = lba + ((data.len() - 1) / BYTES_PER_LBA) as LbaT;
+        let end_lba = lba + (data.len() / BYTES_PER_LBA) as LbaT;
 
         let mut surviving = Vec::with_capacity(k);
         let mut missing = Vec::with_capacity(f);
@@ -1078,14 +1100,49 @@ impl VdevRaid {
         let mut container = Vec::with_capacity(k);
         let mut excols = exbufs.into_iter()
             .map(|dbs| dbs.try_mut().unwrap());
-        let mut dcols = data.into_chunks(col_len);
+        //let mut dcols = data.into_chunks(col_len);
+        let stripe_offset = lba % (m as LbaT * self.chunksize);
         for (i, r) in v.iter().enumerate().take(k) {
-            let stripe_offset = lba % (m as LbaT * self.chunksize);
-            let recovery_lba = lba - stripe_offset + i as LbaT * self.chunksize;
-            let mut col = if lba <= recovery_lba && recovery_lba <= end_lba
-            {
-                dcols.next().unwrap()
+            let chunk_lba = lba - stripe_offset + i as LbaT * self.chunksize;
+            debug_assert_eq!(chunk_lba % self.chunksize, 0);
+            let chunk_elba = chunk_lba + self.chunksize;
+            dbg!(chunk_lba, chunk_elba);
+            let mut col = if chunk_elba <= lba {
+                // This chunk is needed for reconstruction only
+                eprintln!("        1");
+                excols.next().unwrap()
+            } else if chunk_lba < lba {
+                // This chunk is partially needed by the user, and partially
+                // needed for reconstruction.  We should've read it into the
+                // parity buffer; now we must partially copy that back to the
+                // user buffer.
+                eprintln!("        2");
+                let excol = excols.next().unwrap();
+                let l = (chunk_elba - lba) as usize * BYTES_PER_LBA;
+                debug_assert!(l < self.chunksize as usize * BYTES_PER_LBA);
+                let mut dcol = data.split_to(l);
+                dcol[..].copy_from_slice(&excol[0..l]);
+                excol
+            } else if chunk_elba <= end_lba {
+                // This whole chunk is needed by the user
+                eprintln!("        3");
+                data.split_to(col_len)
+            } else if chunk_lba < end_lba {
+                // This chunk is partially needed by the user, and partially
+                // needed for reconstruction.  We should've read it into the
+                // parity buffer; now we must partially copy that back to the
+                // user buffer.
+                eprintln!("        4");
+                let excol = excols.next().unwrap();
+                let l = data.len();
+                let mut dcol = data.split_to(l);
+                debug_assert_eq!(l, (end_lba - chunk_lba) as usize * BYTES_PER_LBA);
+                debug_assert!(l < self.chunksize as usize * BYTES_PER_LBA);
+                dcol[..].copy_from_slice(&excol[0..l]);
+                excol
             } else {
+                eprintln!("        5");
+                debug_assert!(chunk_lba >= end_lba);
                 excols.next().unwrap()
             };
             if r.is_ok() {
