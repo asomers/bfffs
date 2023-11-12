@@ -2207,6 +2207,69 @@ root:
     assert!(r.is_ok());
 }
 
+/// While syncing a tree with dirty leaf nodes, the underlying storage returns
+/// ENOSPC.  (Other errors are handled similarly).
+#[test]
+fn write_enospc() {
+    let mut seq = Sequence::new();
+    let mut mock = MockDML::new();
+    mock.expect_put::<Arc<Node<u32, u32, u32>>>()
+        .once()
+        .in_sequence(&mut seq)
+        .withf(move |cacheable, _compression, txg| {
+            let node_data = cacheable.0.try_read().unwrap();
+            match node_data.deref() {
+                NodeData::Leaf(leaf_data) => {
+                    leaf_data.get(&0) == Some(100) &&
+                    leaf_data.get(&1) == Some(200) &&
+                    *txg == TxgT::from(42)
+                },
+                _ => false
+            }
+        }).return_once(move |_, _, _| future::err(Error::ENOSPC).boxed());
+    let dml = Arc::new(mock);
+    let tree = Arc::new(Tree::<u32, MockDML, u32, u32>::from_str(dml, false, r#"
+---
+limits:
+  min_int_fanout: 2
+  max_int_fanout: 5
+  min_leaf_fanout: 2
+  max_leaf_fanout: 5
+  _max_size: 4194304
+root:
+  height: 2
+  elem:
+    key: 0
+    txgs:
+      start: 30
+      end: 42
+    ptr:
+      Mem:
+        Int:
+          children:
+            - key: 0
+              txgs:
+                start: 41
+                end: 43
+              ptr:
+                Mem:
+                  Leaf:
+                    credit: 32
+                    items:
+                      0: 100
+                      1: 200
+            - key: 256
+              txgs:
+                start: 41
+                end: 42
+              ptr:
+                Addr: 256
+  "#));
+
+    let r = tree.clone().flush(TxgT::from(42)).now_or_never().unwrap();
+    assert_eq!(Err(Error::ENOSPC), r);
+}
+
 /// Sync a Tree with both dirty Int nodes and dirty Leaf nodes
 #[test]
 fn write_height2() {
