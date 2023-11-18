@@ -624,7 +624,7 @@ impl DML for IDML {
 
     #[instrument(skip(self))]
     fn put<T>(&self, cacheable: T, compression: Compression, txg: TxgT)
-        -> Pin<Box<dyn Future<Output=Result<Self::Addr>> + Send>>
+        -> Pin<Box<dyn Future<Output=std::result::Result<Self::Addr, (Error, T)>> + Send >>
         where T: Cacheable
     {
         // TODO: spawn a separate task, for better parallelism.
@@ -636,26 +636,40 @@ impl DML for IDML {
         let cache2 = self.cache.clone();
         let alloct2 = self.alloct.clone();
         let ridt2 = self.ridt.clone();
+        let ddml2 = self.ddml.clone();
         let rid = RID(self.next_rid.fetch_add(1, Ordering::Relaxed));
 
-        let fut = self.ddml.put_direct(&cacheable.make_ref(), compression, txg)
-        .and_then(move|drp| {
+        let fut = self.ddml.put_direct(&cacheable.make_ref(), compression, txg);
+        let fut2 = async move {
+            let drp = match fut.await {
+                Err(e) => return Err((e, cacheable)),
+                Ok(drp) => drp
+            };
             let alloct_fut = alloct2.insert(drp.pba(), rid, txg,
                                             Credit::null());
             let rid_entry = RidtEntry::new(drp);
             let ridt_fut = ridt2.insert(rid, rid_entry, txg, Credit::null());
-            future::try_join(ridt_fut, alloct_fut)
-            .map_ok(move |(old_rid_entry, old_alloc_entry)| {
-                assert!(old_rid_entry.is_none(), "RID was not unique");
-                assert!(old_alloc_entry.is_none(), concat!(
-                    "Double allocate without free.  ",
-                    "DDML allocator leak detected!"));
-                cache2.lock().unwrap()
-                    .insert(Key::Rid(rid), Box::new(cacheable));
-                rid
-            })
-        });
-        Box::pin(fut)
+            let r = future::try_join(ridt_fut, alloct_fut).await;
+            match r {
+                Ok((old_rid_entry, old_alloc_entry)) => {
+                    assert!(old_rid_entry.is_none(), "RID was not unique");
+                    assert!(old_alloc_entry.is_none(), concat!(
+                        "Double allocate without free.  ",
+                        "DDML allocator leak detected!"));
+                    cache2.lock().unwrap()
+                        .insert(Key::Rid(rid), Box::new(cacheable));
+                    Ok(rid)
+                }
+                Err(e) => {
+                    // TODO: pop from ddml
+                    // We couldn't update the alloct and RIDT!  So we must undo
+                    // the previous write.
+                    let _ = ddml2.delete_direct(&drp, txg).await;
+                    Err((e, cacheable))
+                }
+            }
+        };
+        Box::pin(fut2)
     }
 
     fn repay(&self, credit: Credit) {

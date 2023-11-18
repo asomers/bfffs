@@ -363,16 +363,21 @@ impl DML for DDML {
     #[instrument(skip(self))]
     fn put<T: Cacheable>(&self, cacheable: T, compression: Compression,
                              txg: TxgT)
-        -> Pin<Box<dyn Future<Output=Result<<Self as DML>::Addr>> + Send>>
+        -> Pin<Box<dyn Future<Output=std::result::Result<<Self as DML>::Addr, (Error, T)>> + Send >>
     {
         let cache2 = self.cache.clone();
         let db = cacheable.make_ref();
         let fut = self.put_common(&db, compression, txg)
-            .map_ok(move |drp|{
-                let pba = drp.pba();
-                cache2.lock().unwrap()
-                    .insert(Key::PBA(pba), Box::new(cacheable));
-                drp
+            .map(move |r| {
+                match r {
+                    Ok(drp) => {
+                        let pba = drp.pba();
+                        cache2.lock().unwrap()
+                            .insert(Key::PBA(pba), Box::new(cacheable));
+                        Ok(drp)
+                    },
+                    Err(e) => Err((e, cacheable))
+                }
             }).in_current_span();
         Box::pin(fut)
     }
@@ -414,7 +419,7 @@ mock! {
             -> Pin<Box<dyn Future<Output=Result<Box<T>>> + Send>>;
         pub fn put_direct<T: 'static>(&self, cacheref: &T, compression: Compression,
                          txg: TxgT)
-            -> Pin<Box<dyn Future<Output=Result<DRP>> + Send>>
+            -> Pin<Box<dyn Future<Output=std::result::Result<<Self as DML>::Addr, (Error, T)>> + Send >>
             where T: borrow::Borrow<dyn CacheRef>;
         pub fn size(&self) -> Pin<Box<dyn Future<Output=LbaT> + Send>>;
         pub fn status(&self) -> Pin<Box<dyn Future<Output=Status> + Send>>;
@@ -434,7 +439,7 @@ mock! {
             -> Pin<Box<dyn Future<Output=Result<Box<T>>> + Send>>;
         fn put<T: Cacheable>(&self, cacheable: T, compression: Compression,
                                  txg: TxgT)
-            -> Pin<Box<dyn Future<Output=Result<DRP>> + Send>>;
+            -> Pin<Box<dyn Future<Output=std::result::Result<<Self as DML>::Addr, (Error, T)>> + Send >>;
         fn repay(&self, credit: Credit);
         fn sync_all(&self, txg: TxgT)
             -> Pin<Box<dyn Future<Output=Result<()>> + Send>>;

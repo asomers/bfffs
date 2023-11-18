@@ -113,7 +113,7 @@ pub trait DML: Send + Sync {
     /// Write a record to disk and cache.  Return its Direct Record Pointer.
     fn put<T: Cacheable>(&self, cacheable: T, compression: Compression,
                              txg: TxgT)
-        -> Pin<Box<dyn Future<Output=Result<<Self as DML>::Addr>> + Send>>;
+        -> Pin<Box<dyn Future<Output=std::result::Result<<Self as DML>::Addr, (Error, T)>> + Send >>;
 
     /// Repay [`Credit`] to [`WriteBack`](crate::writeback::WriteBack)
     fn repay(&self, credit: Credit);

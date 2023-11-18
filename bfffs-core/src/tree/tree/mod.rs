@@ -393,7 +393,7 @@ enum WriteLeaf<A: Addr, D: DML<Addr=A> + 'static, K: Key, V: Value> {
             TxgT
     ),
     Dp(
-            #[pin]Pin<Box<dyn Future<Output = Result<D::Addr>> + Send>>,
+            #[pin]Pin<Box<dyn Future<Output = std::result::Result<D::Addr, (Error, Arc<Node<A, K, V>>)>> + Send>>,
             Arc<D>,
             Credit
     ),
@@ -402,30 +402,45 @@ enum WriteLeaf<A: Addr, D: DML<Addr=A> + 'static, K: Key, V: Value> {
 
 impl<A: Addr, D: DML<Addr=A>, K: Key, V: Value> Future for WriteLeaf<A, D, K, V>
 {
-    type Output = Result<A>;
+    //type Output = Result<A>;
+    type Output = std::result::Result<A, (Error, Arc<Node<A, K, V>>)>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         Poll::Ready(loop {
             match self.as_mut().project() {
                 WriteLeafProj::Ldf(ldf, dml, compressor, txg) => {
                     let r = futures::ready!(ldf.poll(cx));
+                    dbg!(&r);
                     if let Err(e) = r {
-                        break Err(e);
+                        todo!()
+                        //break Err(e);
                     }
                     let mut ld = r.unwrap();
                     let credit = ld.take_credit();
                     let node = Node::new(NodeData::Leaf(ld));
                     let arc: Arc<Node<A, K, V>> = Arc::new(node);
-                    let dp = dml.put(arc, *compressor, *txg);
+                    let dp = dml.put(arc, *compressor, *txg)
+                        //.map_err(|(e, _)| e)
+                        .boxed();
                     // TODO: figure out how to eliminate the clone
                     let dml2 = dml.clone();
                     self.set(WriteLeaf::Dp(dp, dml2, credit));
                 }
-                WriteLeafProj::Dp(dp, dml, credit) => {
-                    let r = futures::ready!(dp.poll(cx));
-                    if r.is_ok() {
-                        dml.repay(credit.take());
-                    }
+                WriteLeafProj::Dp(dp, dml, mut credit) => {
+                    let mut r = futures::ready!(dp.poll(cx));
+                    match r {
+                        Ok(_) => {
+                            dml.repay(credit.take());
+                            //break Ok(());
+                        },
+                        Err((ref e, ref mut n)) => {
+                            dbg!(&e);
+                            n.acredit(&mut credit);
+                            //break e;
+                            //let node = Node::new(NodeData::Leaf(ld));
+                            //return (e, node);
+                        }
+                    } 
                     self.set(Self::Empty);
                     break r;
                 }
@@ -959,7 +974,10 @@ impl<A, D, K, V> Tree<A, D, K, V>
                             let old_node = rg.elem.ptr.take();
                             let addr = Tree::write_leaf(dml2, lcomp,
                                 *old_node, txg)
-                                .await?;
+                                .await;
+                            dbg!(&rg.elem);
+                            let addr = addr.map_err(|(e, _)| e)?;
+                            // TODO: test ENOSPC here
                             rg.elem.ptr = TreePtr::Addr(addr);
                             rg.elem.txgs = txg .. txg + 1;
                             Ok(Some((false, (false, lowest))))
@@ -972,7 +990,9 @@ impl<A, D, K, V> Tree<A, D, K, V>
                             drop(guard);
                             let rnode = rg.elem.ptr.take();
                             let a = dml2.put(Arc::new(*rnode), icomp, txg)
+                                .map_err(|(e, _)| e)
                                 .await?;
+                            // TODO: test ENOSPC here
                             rg.elem.ptr = TreePtr::Addr(a);
                             let txgs = start_txg .. txg + 1;
                             rg.elem.txgs = txgs;
@@ -1007,14 +1027,24 @@ impl<A, D, K, V> Tree<A, D, K, V>
                     let guard = elem.ptr.as_mem().xlock().await;
                     drop(guard);
                     let old_node = elem.ptr.take();
-                    let addr = Tree::write_leaf(dml3, leaf_compressor,
+                    // XXX we can drop credit here during ENOSPC
+                    let r = Tree::write_leaf(dml3, leaf_compressor,
                         *old_node, txg)
-                        .await?;
-                    let txgs = txg .. txg + 1;
-                    elem.ptr = TreePtr::Addr(addr);
-                    elem.txgs = txgs;
-                    let r: Result<()> = Ok(());
-                    r
+                        .await;
+                    match r {
+                        Err((e, _)) => {
+                            // TODO: put back the dirty node and recover from
+                            // the error
+                            Err(e)
+                        },
+                        Ok(addr) => {
+                    //panic!("XXX");
+                            let txgs = txg .. txg + 1;
+                            elem.ptr = TreePtr::Addr(addr);
+                            elem.txgs = txgs;
+                            Ok(())
+                        }
+                    }
                 }
             }).collect::<FuturesUnordered<_>>()
             .try_collect::<Vec<_>>().await?;
@@ -1072,7 +1102,9 @@ impl<A, D, K, V> Tree<A, D, K, V>
                     .unwrap();
                 drop(child);
                 let node = *cptr.take();
-                let a = dml.put(Arc::new(node), int_compressor, txg).await?;
+                let a = dml.put(Arc::new(node), int_compressor, txg)
+                        .map_err(|(e, _)| e)
+                            .await?;
                 *cptr = TreePtr::Addr(a);
                 let txgs = start_txg .. txg + 1;
                 int.children[idx].txgs = txgs;
@@ -2492,6 +2524,7 @@ impl<D, K, V> Tree<ddml::DRP, D, K, V>
                                         guard.elem.ptr.as_addr(), txg)
                     .and_then(move |arc| {
                         dml2.put(*arc, Compression::None, txg)
+                    .map_err(|(e, _)| e)
                     }).map_ok(move |addr| {
                         let new = TreePtr::Addr(addr);
                         guard.elem.ptr = new;
@@ -2535,6 +2568,7 @@ impl<D, K, V> Tree<ddml::DRP, D, K, V>
                         }   // LCOV_EXCL_LINE   grcov false negative
                     }
                     dml2.put(*arc, Compression::None, txg)
+                        .map_err(|(e, _)| e)
                 }).map_ok(move |addr| {
                     let new = TreePtr::Addr(addr);
                     guard.as_int_mut().children[child_idx].ptr = new;

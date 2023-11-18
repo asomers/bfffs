@@ -648,7 +648,7 @@ impl<'de, K: Key, V: Value> Deserialize<'de> for LeafData<K, V> {
                 let ld = LeafData{ credit, items };
                 if K::USES_CREDIT {
                     assert_eq!(ld.credit, ld.wb_space(),
-                        "Insufficient credit was present in the YAML tree");
+                        "Incorrect credit was present in the YAML tree");
                 }
                 Ok(ld)
             }
@@ -1095,6 +1095,13 @@ pub enum NodeData<A: Addr, K: Key, V: Value> {
 }
 
 impl<A: Addr, K: Key, V: Value> NodeData<A, K, V> {
+    fn acredit(&mut self, credit: &mut Credit) {
+        match self {
+            NodeData::Leaf(ld) => ld.acredit(credit),
+            NodeData::Int(_) => unimplemented!()
+        }
+    }
+
     pub fn as_int(&self) -> &IntData<A, K, V> {
         if let NodeData::Int(int) = self {
             int
@@ -1469,6 +1476,11 @@ pub struct Node<A, K, V> (
     where A: Addr, K: Key, V: Value;
 
 impl<A: Addr, K: Key, V: Value> Node<A, K, V> {
+    /// Absorb as much credit as this Node needs.
+    pub fn acredit(&mut self, credit: &mut Credit) {
+        self.0.get_mut().unwrap().acredit(credit)
+    }
+
     pub fn new(node_data: NodeData<A, K, V>) -> Self {
         Node(RwLock::new(node_data))
     }
