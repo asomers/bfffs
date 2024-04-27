@@ -18,23 +18,22 @@ use futures::{
 };
 #[cfg(test)] use mockall::mock;
 use nix::libc::{c_int, off_t};
-use num_traits::FromPrimitive;
 use pin_project::pin_project;
 use std::{
     borrow::Borrow,
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{self, IoSlice, IoSliceMut},
     mem::{self, MaybeUninit},
     num::NonZeroU64,
     os::unix::{
-        fs::OpenOptionsExt,
+        fs::{FileTypeExt, OpenOptionsExt},
         io::{AsRawFd, RawFd}
     },
     path::Path,
     pin::Pin,
     sync::atomic::Ordering
 };
-use tokio_file::File;
+use tokio_file::AioFileExt;
 use tokio::task;
 
 /// How does this device deallocate sectors?
@@ -100,15 +99,30 @@ mod ffi {
         diocgattr, b'd', 142, diocgattr_arg
     }
 
+    nix::ioctl_read! {
+        /// get the size of the entire device in bytes.  this should be a
+        /// multiple of the sector size.
+        diocgmediasize, 'd', 129, nix::libc::off_t
+    }
+
     ioctl_write_ptr! {
         /// FreeBSD's catch-all ioctl for hole-punching, TRIM, UNMAP,
         /// Deallocate, and EraseWritePointer of GEOM devices.
         #[doc(hidden)]
         diocgdelete, b'd', 136, [off_t; 2]
     }
+
+    nix::ioctl_read! {
+        diocgsectorsize, 'd', 128, nix::libc::c_uint
+    }
+
+    nix::ioctl_read! {
+        diocgstripesize, 'd', 139, nix::libc::off_t
+    }
+
 }
 
-use ffi::{diocgdelete, diocgattr, diocgattr_arg};
+use ffi::{diocgdelete, diocgattr, diocgattr_arg, diocgmediasize, diocgsectorsize, diocgstripesize};
 
 
 /// `VdevFile`: File-backed implementation of `VdevBlock`
@@ -121,14 +135,14 @@ use ffi::{diocgdelete, diocgattr, diocgattr_arg};
 #[derive(Debug)]
 pub struct VdevFile {
     // XXX remove the pub after updating tokio_file to use AioFileExt
-    pub file:           File,
+    pub file:           fs::File,
     /// Number of reserved LBAS in first zone for each spacemap
     spacemap_space: LbaT,
     /// Number of LBAs per simulated zone
     lbas_per_zone:  LbaT,
     size:           LbaT,
     /// How does the underlying file deallocate data?
-    erase_method:   AtomicEraseMethod
+    erase_method:   AtomicEraseMethod,
 }
 
 impl Vdev for VdevFile {
@@ -152,7 +166,7 @@ impl Vdev for VdevFile {
     fn sync_all<'a>(&'a self) -> Pin<Box<dyn futures::Future<Output = Result<()>> + Send + Sync + 'a>>
     //fn sync_all<'a>(&'a self) ->  impl Future<Output = Result<()>> + Send + Sync + 'a
     {
-        let fut = self.file.sync_all().unwrap()
+        let fut = AioFileExt::sync_all(&self.file).unwrap()
             .map_ok(drop)
             .map_err(Error::from);
         Box::pin(fut)
@@ -204,31 +218,12 @@ impl VdevFile {
         -> io::Result<Self>
         where P: AsRef<Path>
     {
-        // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
-        // block indefinitely.  However, using O_NONBLOCK is worse because it
-        // can cause spurious failures, such as when another thread fork()s.
-        // That happens frequently in the functional tests.
-        let f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
-            .open(path)
-            .map(File::new)?;
-        let lpz = match lbas_per_zone {
-            None => VdevFile::DEFAULT_LBAS_PER_ZONE,
-            Some(x) => x.get()
-        };
-        let erase_method = AtomicEraseMethod::initial(f.as_raw_fd()).unwrap();
-        let size = f.len().unwrap() / BYTES_PER_LBA as u64;
-        let nzones = div_roundup(size, lpz);
-        let spacemap_space = spacemap_space(nzones);
-        Ok(VdevFile{
-            file: f,
-            spacemap_space,
-            lbas_per_zone: lpz,
-            size,
-            erase_method
-        })
+        let pb = path.as_ref().to_path_buf();
+        let mut vdev = VdevFile::new(pb).unwrap();
+        if let Some(x) = lbas_per_zone {
+            vdev.lbas_per_zone = x.get();
+        }
+        Ok(vdev)
     }
 
     /// Asynchronously erase the given zone.
@@ -317,6 +312,72 @@ impl VdevFile {
         self.lbas_per_zone
     }
 
+    /// Get the file's size in bytes, whether it's a device file or a regular
+    /// file
+    fn devlen(f: &fs::File, sectorsize: usize) -> io::Result<u64> {
+        let md = f.metadata()?;
+        if sectorsize > 1 {
+            let mut mediasize = mem::MaybeUninit::<nix::libc::off_t>::uninit();
+            // This ioctl is always safe
+            unsafe {
+                diocgmediasize(f.as_raw_fd(), mediasize.as_mut_ptr())
+            }.map_err(|_| io::Error::from_raw_os_error(nix::errno::Errno::last_raw()))?;
+            // Safe because we know the ioctl succeeded
+            unsafe { Ok(mediasize.assume_init() as u64) }
+        } else {
+            Ok(md.len())
+        }
+    }
+
+    /// Partially construct a VdevFile.
+    fn new(pb: PathBuf) -> Result<Self> {
+        // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
+        // block indefinitely.  However, using O_NONBLOCK is worse because it
+        // can cause spurious failures, such as when another thread fork()s.
+        // That happens frequently in the functional tests.
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
+            .open(pb.as_path())?;
+        let md = f.metadata()?;
+        let ft = md.file_type();
+        // The preferred (not necessarily minimum) sector size for accessing
+        // the device
+        let sectorsize = if ft.is_block_device() || ft.is_char_device() {
+            let mut sectorsize = mem::MaybeUninit::<u32>::uninit();
+            let mut stripesize = mem::MaybeUninit::<nix::libc::off_t>::uninit();
+            let fd = f.as_raw_fd();
+            unsafe {
+                // TODO: use stripesize if it's greater than sector size
+                diocgsectorsize(fd, sectorsize.as_mut_ptr())?;
+                diocgstripesize(fd, stripesize.as_mut_ptr())?;
+                if stripesize.assume_init() > 0 {
+                    stripesize.assume_init() as usize
+                } else {
+                    sectorsize.assume_init() as usize
+                }
+            }
+        } else {
+            1
+        };
+        let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
+        let size = Self::devlen(&f, sectorsize)? / BYTES_PER_LBA as u64;
+        let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
+        let nzones = div_roundup(size, lbas_per_zone);
+        let spacemap_space = spacemap_space(nzones);
+        let vdev = VdevFile {
+            erase_method,
+            file: f,
+            lbas_per_zone,
+            path: pb,
+            size,
+            spacemap_space,
+            uuid: Uuid::default()
+        };
+        Ok(vdev)
+    }
+
     /// Open a Vdev, backed by a file.
     ///
     /// * `path`:           Pathname for the file.  It may be a device node.
@@ -345,6 +406,26 @@ impl VdevFile {
             erase_method
         };
         Ok(vdev)
+    }
+
+    /// Returns both a new `VdevFile` object, and a `LabelReader` that may be
+    /// used to construct other vdevs stacked on top of this one.
+    ///
+    /// * `path`    Pathname for the file.  It may be a device node.
+    pub async fn open<P: AsRef<Path>>(path: P)
+        -> Result<(Self, LabelReader)>
+    {
+        let pb = path.as_ref().to_path_buf();
+        let mut vdev = Self::new(pb)?;
+        let mut label_reader = VdevFile::read_label(&vdev.file).await?;
+        let label: Label = label_reader.deserialize().unwrap();
+        assert!(vdev.size >= label.lbas,
+                "Vdev has shrunk since creation");
+        vdev.spacemap_space = label.spacemap_space;
+        vdev.lbas_per_zone = label.lbas_per_zone;
+        vdev.size = label.lbas;
+        vdev.uuid = label.uuid;
+        Ok((vdev, label_reader))
     }
 
     /// Asynchronously open the given zone.

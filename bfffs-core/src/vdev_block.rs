@@ -1087,7 +1087,7 @@ impl Manager {
 
     /// Read just one of a vdev's labels
     #[cfg(not(test))]
-    async fn read_label(f: &tokio_file::File) -> Result<LabelReader>
+    async fn read_label(f: &fs::File) -> Result<LabelReader>
     {
         let mut r = Err(Error::EDOOFUS);    // Will get overridden
 
