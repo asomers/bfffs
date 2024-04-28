@@ -39,7 +39,7 @@ use crate::{
 #[cfg(test)]
 pub type VdevLeaf = MockVdevFile;
 #[cfg(not(test))]
-pub type VdevLeaf = VdevFile;
+pub type VdevLeaf<'fd> = VdevFile<'fd>;
 
 lazy_static! {
     static ref IOV_MAX: Option<NonZeroUsize> = {
@@ -415,8 +415,9 @@ struct Inner {
     weakself: Weak<RwLock<Inner>>,
 
     /// Underlying device
+    leaf: VdevLeaf<'static>,
     // Must come last, so it drops after fields containing BlockOps
-    leaf: VdevLeaf,
+    device: fs::File,
 }
 
 impl Inner {
@@ -1056,7 +1057,7 @@ pub struct Label {
 /// Holds a VdevLeaf that has already been tasted
 #[cfg(not(test))]
 struct ImportableLeaf {
-    leaf: VdevLeaf,
+    file: fs::File,
     /// The path at which this leaf was last seen.  It may change.
     path: PathBuf
 }
@@ -1076,12 +1077,16 @@ impl Manager {
     {
         future::ready(self.devices.remove(&uuid).ok_or(Error::ENOENT))
             .and_then(move |rec| async move {
-                let mut lr = Self::read_label(&rec.leaf.file).await?;
-                let label: Label = lr.deserialize().unwrap();
-                assert_eq!(uuid, label.uuid);
-                let vb = VdevBlock::new(rec.leaf, rec.path, uuid, label.lbas,
-                                        label.lbas_per_zone);
-                Ok((vb, lr))
+                VdevLeaf::open2(rec.path, &f)
+                    .map_ok(|vf, lr| {
+                        let mut lr = Self::read_label(&f).await?;
+                        let label: Label = lr.deserialize().unwrap();
+                        assert_eq!(uuid, label.uuid);
+                        let vb = VdevBlock::new(f, vf, rec.path, uuid,
+                                                label.lbas,
+                                                label.lbas_per_zone);
+                        Ok((vb, lr))
+                    })
             })
     }
 
@@ -1124,12 +1129,16 @@ impl Manager {
     // TODO: add a method for tasting disks in parallel.
     #[cfg(not(test))]
     pub async fn taste<P: AsRef<Path>>(&mut self, p: P) -> Result<LabelReader> {
-        let mut leaf = VdevLeaf::open(&p).await?;
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
+            .open(&p)?;
         let path = p.as_ref().to_path_buf();
         let mut lr = Self::read_label(&leaf.file).await?;
         let label: Label = lr.deserialize().unwrap();
         leaf.set(label.lbas, label.lbas_per_zone);
-        let importable = ImportableLeaf{leaf, path};
+        let importable = ImportableLeaf{f, path};
         self.devices.insert(label.uuid, importable);
         Ok(lr)
     }
