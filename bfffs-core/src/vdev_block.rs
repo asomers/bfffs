@@ -4,6 +4,7 @@ use futures::{
     Future,
     FutureExt,
     channel::oneshot,
+    future,
     task::{Context, Poll}
 };
 #[cfg(not(test))] use futures::{TryFutureExt, future};
@@ -13,11 +14,16 @@ use pin_project::pin_project;
 use serde_derive::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, BTreeMap},
     collections::VecDeque,
+    fs::{self, OpenOptions},
     io,
     mem,
     num::{NonZeroU64, NonZeroUsize},
+    os::{
+        fd::AsFd,
+        unix::fs::OpenOptionsExt
+    },
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, RwLock, Weak},
@@ -1135,17 +1141,11 @@ impl Manager {
             .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
             .open(&p)?;
         let path = p.as_ref().to_path_buf();
-        let mut lr = Self::read_label(&leaf.file).await?;
+        let mut lr = Self::read_label(&f).await?;
         let label: Label = lr.deserialize().unwrap();
-        leaf.set(label.lbas, label.lbas_per_zone);
         let importable = ImportableLeaf{f, path};
         self.devices.insert(label.uuid, importable);
         Ok(lr)
-    }
-    #[cfg(test)]
-    pub async fn taste<P: AsRef<Path>>(&mut self, _p: P) -> Result<LabelReader>
-    {
-        unimplemented!()
     }
 }
 

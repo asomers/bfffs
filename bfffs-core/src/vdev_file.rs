@@ -25,9 +25,12 @@ use std::{
     io::{self, IoSlice, IoSliceMut},
     mem::{self, MaybeUninit},
     num::NonZeroU64,
-    os::unix::{
-        fs::{FileTypeExt, OpenOptionsExt},
-        io::{AsRawFd, BorrowedFd, RawFd}
+    os::{
+        fd::AsFd,
+        unix::{
+            fs::{FileTypeExt, OpenOptionsExt},
+            io::{AsRawFd, BorrowedFd, RawFd}
+        },
     },
     path::Path,
     pin::Pin,
