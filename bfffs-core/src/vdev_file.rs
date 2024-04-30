@@ -231,6 +231,15 @@ impl<'fd> VdevFile<'fd> {
         Ok(vdev)
     }
 
+    pub fn create2<P>(path: P, f: &fs::File, lbas_per_zone: Option<NonZeroU64>)
+        -> io::Result<Self>
+        where P: AsRef<Path>
+    {
+        let pb = path.as_ref().to_path_buf();
+        todo!()
+    }
+
+
     /// Asynchronously erase the given zone.
     ///
     /// After this, the zone will be in the empty state.  The data may or may

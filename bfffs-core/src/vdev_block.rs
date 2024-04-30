@@ -885,6 +885,33 @@ impl VdevBlock {
         }
     }
 
+    async fn open(pb: PathBuf, f: fs::File) -> Result<(Self, LabelReader)> {
+        let (leaf, lr) = VdevLeaf::open2(pb, &f).await?;
+        let size = leaf.size();
+        let spacemap_space = leaf.spacemap_space();
+        let inner = Arc::new(RwLock::new(Inner {
+            delayed: None,
+            optimum_queue_depth: leaf.optimum_queue_depth(),
+            queue_depth: 0,
+            last_lba: 0,
+            remover: None,
+            syncing: false,
+            after_sync: VecDeque::new(),
+            ahead: BinaryHeap::new(),
+            behind: BinaryHeap::new(),
+            weakself: Weak::new(),
+            leaf,
+            device: f
+        }));
+        inner.write().unwrap().weakself = Arc::downgrade(&inner);
+        let vb = VdevBlock {
+            inner,
+            size,
+            spacemap_space
+        };
+        Ok((vb,lr))
+    }
+
     /// The pathname most recently used to open this device.
     pub fn path(&self) -> &Path {
         &self.path
@@ -1083,16 +1110,13 @@ impl Manager {
     {
         future::ready(self.devices.remove(&uuid).ok_or(Error::ENOENT))
             .and_then(move |rec| async move {
-                VdevLeaf::open2(rec.path, &f)
-                    .map_ok(|vf, lr| {
-                        let mut lr = Self::read_label(&f).await?;
-                        let label: Label = lr.deserialize().unwrap();
-                        assert_eq!(uuid, label.uuid);
-                        let vb = VdevBlock::new(f, vf, rec.path, uuid,
-                                                label.lbas,
-                                                label.lbas_per_zone);
-                        Ok((vb, lr))
-                    })
+                let vr = VdevLeaf::open(&f).await?;
+                let mut lr = Self::read_label(&f).await?;
+                let label: Label = lr.deserialize().unwrap();
+                assert_eq!(uuid, label.uuid);
+                let vb = VdevBlock::new(f, vf, rec.path, uuid,
+                    label.lbas, label.lbas_per_zone);
+                Ok((vb, lr))
             })
     }
 
