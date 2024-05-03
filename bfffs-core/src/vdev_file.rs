@@ -136,9 +136,7 @@ use ffi::{diocgdelete, diocgattr, diocgattr_arg, diocgmediasize, diocgsectorsize
 /// I/O operations on `VdevFile` happen immediately; they are not scheduled.
 ///
 #[derive(Debug)]
-pub struct VdevFile {
-    // XXX remove the pub after updating tokio_file to use AioFileExt
-    pub file:           fs::File,
+pub struct VdevFile<'fd> {
     fd:             BorrowedFd<'fd>,
     /// Number of reserved LBAS in first zone for each spacemap
     spacemap_space: LbaT,
@@ -252,13 +250,13 @@ impl<'fd> VdevFile<'fd> {
     // There isn't (yet) a way to asynchronously trim, so use a synchronous
     // method in a blocking_task
     pub fn erase_zone(&self, start: LbaT, end: LbaT) -> BoxVdevFut {
-        let fd = self.file.as_raw_fd();
         let off = start as off_t * (BYTES_PER_LBA as off_t);
         let len = (end + 1 - start) as off_t * BYTES_PER_LBA as off_t;
         let em = self.erase_method.load(Ordering::Relaxed);
         match em {
             EraseMethod::None => Box::pin(future::ok(())),
             EraseMethod::Diocgdelete => {
+                let fd = self.fd.as_raw_fd();
                 let t = task::spawn_blocking(move || {
                     let args = [off, len];
                     unsafe {
@@ -274,7 +272,7 @@ impl<'fd> VdevFile<'fd> {
 
                 // The first time erasing a zone, do it synchronously so we can
                 // change the erase_method.
-                match fspacectl_all(fd, off, len) {
+                match fspacectl_all(&self.fd, off, len) {
                     Err(nix::Error::ENOSYS) =>  {
                         // fspacectl is not supported by the running system
                         self.erase_method.store(EraseMethod::None,
@@ -301,7 +299,7 @@ impl<'fd> VdevFile<'fd> {
                 use nix::fcntl::fspacectl_all;
 
                 let t = task::spawn_blocking(move || {
-                    fspacectl_all(fd, off, len)
+                    fspacectl_all(&self.fd, off, len)
                 }).map(std::result::Result::unwrap)
                 .map_err(Error::from);
                 Box::pin(t)
@@ -344,7 +342,7 @@ impl<'fd> VdevFile<'fd> {
     }
 
     /// Partially construct a VdevFile.
-    fn new(pb: PathBuf) -> Result<Self> {
+    fn new(pb: std::path::PathBuf) -> Result<Self> {
         todo!()
         // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
         // block indefinitely.  However, using O_NONBLOCK is worse because it
@@ -401,54 +399,54 @@ impl<'fd> VdevFile<'fd> {
     /// Open a Vdev, backed by a file.
     ///
     /// * `path`:           Pathname for the file.  It may be a device node.
-    pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+    //pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
         // block indefinitely.  However, using O_NONBLOCK is worse because it
         // can cause spurious failures, such as when another thread fork()s.
         // That happens frequently in the functional tests.
-        let stdfile = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
-            .open(path)
-            .map_err(|e| Error::from_i32(e.raw_os_error().unwrap()).unwrap())?;
-        let f = File::new(stdfile);
-        let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
-        let size = f.len().unwrap() / BYTES_PER_LBA as u64;
-        let nzones = div_roundup(size, lbas_per_zone);
-        let spacemap_space = spacemap_space(nzones);
-        let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
-        let vdev = VdevFile {
-            file: f,
-            spacemap_space,
-            lbas_per_zone,
-            size,
-            erase_method
-        };
-        Ok(vdev)
-    }
+        //let stdfile = OpenOptions::new()
+            //.read(true)
+            //.write(true)
+            //.custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
+            //.open(path)
+            //.map_err(|e| Error::from_i32(e.raw_os_error().unwrap()).unwrap())?;
+        //let f = File::new(stdfile);
+        //let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
+        //let size = f.len().unwrap() / BYTES_PER_LBA as u64;
+        //let nzones = div_roundup(size, lbas_per_zone);
+        //let spacemap_space = spacemap_space(nzones);
+        //let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
+        //let vdev = VdevFile {
+            //file: f,
+            //spacemap_space,
+            //lbas_per_zone,
+            //size,
+            //erase_method
+        //};
+        //Ok(vdev)
+    //}
 
     /// Returns both a new `VdevFile` object, and a `LabelReader` that may be
     /// used to construct other vdevs stacked on top of this one.
     ///
     /// * `path`    Pathname for the file.  It may be a device node.
-    pub async fn open<P: AsRef<Path>>(path: P)
-        -> Result<(Self, LabelReader)>
-    {
-        let pb = path.as_ref().to_path_buf();
-        let mut vdev = Self::new(pb)?;
-        let mut label_reader = VdevFile::read_label(&vdev.file).await?;
-        let label: Label = label_reader.deserialize().unwrap();
-        assert!(vdev.size >= label.lbas,
-                "Vdev has shrunk since creation");
-        vdev.spacemap_space = label.spacemap_space;
-        vdev.lbas_per_zone = label.lbas_per_zone;
-        vdev.size = label.lbas;
-        vdev.uuid = label.uuid;
-        Ok((vdev, label_reader))
-    }
+    //pub async fn open<P: AsRef<Path>>(path: P)
+        //-> Result<(Self, LabelReader)>
+    //{
+        //let pb = path.as_ref().to_path_buf();
+        //let mut vdev = Self::new(pb)?;
+        //let mut label_reader = VdevFile::read_label(&vdev.file).await?;
+        //let label: Label = label_reader.deserialize().unwrap();
+        //assert!(vdev.size >= label.lbas,
+                //"Vdev has shrunk since creation");
+        //vdev.spacemap_space = label.spacemap_space;
+        //vdev.lbas_per_zone = label.lbas_per_zone;
+        //vdev.size = label.lbas;
+        //vdev.uuid = label.uuid;
+        //Ok((vdev, label_reader))
+    //}
 
-    pub async fn open2(pb: PathBuf, f: &fs::File)
+    pub async fn open2(pb: std::path::PathBuf, f: &fs::File)
         -> Result<(Self, LabelReader)>
     {
         todo!()
@@ -483,7 +481,7 @@ impl<'fd> VdevFile<'fd> {
             // heap-allocated, moving it won't change the data's address.
             mem::transmute::<&mut[u8], &'static mut [u8]>(buf.as_mut())
         };
-        let fut = self.file.read_at(&mut *bufaddr, off).unwrap();
+        let fut = self.fd.read_at(&mut *bufaddr, off).unwrap();
         ReadAt { _buf: buf, fut }
     }
 
@@ -667,7 +665,7 @@ impl<'fd> VdevFile<'fd> {
                     IoSlice::new(sb)
                 }).collect::<Vec<_>>()
                 .into_boxed_slice();
-        let fut = self.file.writev_at(&slices, off).unwrap();
+        let fut = self.fd.writev_at(&slices, off).unwrap();
 
         WritevAt {
             _sglist: sglist,

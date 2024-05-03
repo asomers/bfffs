@@ -4,7 +4,6 @@ use futures::{
     Future,
     FutureExt,
     channel::oneshot,
-    future,
     task::{Context, Poll}
 };
 #[cfg(not(test))] use futures::{TryFutureExt, future};
@@ -14,7 +13,7 @@ use pin_project::pin_project;
 use serde_derive::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, BTreeMap},
+    collections::BinaryHeap,
     collections::VecDeque,
     fs::{self, OpenOptions},
     io,
@@ -32,6 +31,7 @@ use std::{
 };
 #[cfg(not(test))]
 use std::collections::BTreeMap;
+use tokio_file::AioFileExt;
 #[cfg(test)] use mockall::*;
 
 use crate::{
@@ -542,18 +542,18 @@ impl Inner {
         // In the context where this is called, we can't return a future.  So we
         // have to spawn it into the event loop manually
         let fut: Pin<Box<VdevFut>> = match block_op.cmd {
-            Cmd::WriteAt(iovec) => self.leaf.write_at(iovec, lba),
+            Cmd::WriteAt(iovec) => Box::pin(self.leaf.write_at(iovec, lba)),
             Cmd::ReadAt(iovec_mut) => Box::pin(self.leaf.read_at(iovec_mut, lba)),
-            Cmd::WritevAt(sglist) => self.leaf.writev_at(sglist, lba),
+            Cmd::WritevAt(sglist) => Box::pin(self.leaf.writev_at(sglist, lba)),
             Cmd::ReadSpacemap(iovec_mut) =>
                     Box::pin(self.leaf.read_spacemap(iovec_mut, lba)),
-            Cmd::ReadvAt(sglist_mut) => self.leaf.readv_at(sglist_mut, lba),
+            Cmd::ReadvAt(sglist_mut) => Box::pin(self.leaf.readv_at(sglist_mut, lba)),
             Cmd::EraseZone(start) => self.leaf.erase_zone(start, lba),
             Cmd::FinishZone(start) => self.leaf.finish_zone(start),
             Cmd::OpenZone => self.leaf.open_zone(lba),
-            Cmd::WriteLabel(labeller) => self.leaf.write_label(labeller),
+            Cmd::WriteLabel(labeller) => Box::pin(self.leaf.write_label(labeller)),
             Cmd::WriteSpacemap(sglist) =>
-                self.leaf.write_spacemap(sglist, lba),
+                Box::pin(self.leaf.write_spacemap(sglist, lba)),
             Cmd::SyncAll => self.leaf.sync_all(),
         };
         (block_op.senders, fut)
@@ -847,47 +847,19 @@ impl VdevBlock {
 
     /// Instantiate a new VdevBlock from an existing VdevLeaf
     ///
-    /// * `leaf`:          An already-open underlying VdevLeaf
     /// * `path`:          Path at which this Leaf was last found.
     /// * `uuid`:          XXX Temporary
     /// * `size`:          TODO describe
     /// * `lbas_per_zone`: Number of LBAs per simulated zone
     fn new(
-        leaf: VdevLeaf,
+        leaf: VdevLeaf<'static>,
+        device: fs::File,
         path: PathBuf,
         uuid: Uuid,
         size: LbaT,
         lbas_per_zone: LbaT
     ) -> Self
     {
-        let spacemap_space = leaf.spacemap_space();
-        let inner = Arc::new(RwLock::new(Inner {
-            delayed: None,
-            optimum_queue_depth: leaf.optimum_queue_depth(),
-            queue_depth: 0,
-            leaf,
-            last_lba: 0,
-            remover: None,
-            syncing: false,
-            after_sync: VecDeque::new(),
-            ahead: BinaryHeap::new(),
-            behind: BinaryHeap::new(),
-            weakself: Weak::new()
-        }));
-        inner.write().unwrap().weakself = Arc::downgrade(&inner);
-        VdevBlock {
-            inner,
-            size,
-            spacemap_space,
-            lbas_per_zone,
-            uuid,
-            path
-        }
-    }
-
-    async fn open(pb: PathBuf, f: fs::File) -> Result<(Self, LabelReader)> {
-        let (leaf, lr) = VdevLeaf::open2(pb, &f).await?;
-        let size = leaf.size();
         let spacemap_space = leaf.spacemap_space();
         let inner = Arc::new(RwLock::new(Inner {
             delayed: None,
@@ -901,16 +873,45 @@ impl VdevBlock {
             behind: BinaryHeap::new(),
             weakself: Weak::new(),
             leaf,
-            device: f
+            device
         }));
         inner.write().unwrap().weakself = Arc::downgrade(&inner);
-        let vb = VdevBlock {
+        VdevBlock {
             inner,
             size,
-            spacemap_space
-        };
-        Ok((vb,lr))
+            spacemap_space,
+            lbas_per_zone,
+            uuid,
+            path
+        }
     }
+
+    //async fn open(pb: PathBuf, f: fs::File) -> Result<(Self, LabelReader)> {
+        //let (leaf, lr) = VdevLeaf::open2(pb, &f).await?;
+        //let size = leaf.size();
+        //let spacemap_space = leaf.spacemap_space();
+        //let inner = Arc::new(RwLock::new(Inner {
+            //delayed: None,
+            //optimum_queue_depth: leaf.optimum_queue_depth(),
+            //queue_depth: 0,
+            //last_lba: 0,
+            //remover: None,
+            //syncing: false,
+            //after_sync: VecDeque::new(),
+            //ahead: BinaryHeap::new(),
+            //behind: BinaryHeap::new(),
+            //weakself: Weak::new(),
+            //leaf,
+            //device: f
+        //}));
+        //inner.write().unwrap().weakself = Arc::downgrade(&inner);
+        //let vb = VdevBlock {
+            //inner,
+            //size,
+            //spacemap_space
+        //};
+        //Ok((vb,lr))
+    //}
 
     /// The pathname most recently used to open this device.
     pub fn path(&self) -> &Path {
@@ -1110,11 +1111,10 @@ impl Manager {
     {
         future::ready(self.devices.remove(&uuid).ok_or(Error::ENOENT))
             .and_then(move |rec| async move {
-                let vr = VdevLeaf::open(&f).await?;
-                let mut lr = Self::read_label(&f).await?;
+                let mut lr = Self::read_label(&rec.file).await?;
                 let label: Label = lr.deserialize().unwrap();
                 assert_eq!(uuid, label.uuid);
-                let vb = VdevBlock::new(f, vf, rec.path, uuid,
+                let vb = VdevBlock::new(rec.file, rec.path, uuid,
                     label.lbas, label.lbas_per_zone);
                 Ok((vb, lr))
             })
@@ -1159,15 +1159,15 @@ impl Manager {
     // TODO: add a method for tasting disks in parallel.
     #[cfg(not(test))]
     pub async fn taste<P: AsRef<Path>>(&mut self, p: P) -> Result<LabelReader> {
-        let f = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
             .open(&p)?;
         let path = p.as_ref().to_path_buf();
-        let mut lr = Self::read_label(&f).await?;
+        let mut lr = Self::read_label(&file).await?;
         let label: Label = lr.deserialize().unwrap();
-        let importable = ImportableLeaf{f, path};
+        let importable = ImportableLeaf{file, path};
         self.devices.insert(label.uuid, importable);
         Ok(lr)
     }
