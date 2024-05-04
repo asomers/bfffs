@@ -750,18 +750,50 @@ impl VdevBlock {
         -> io::Result<Self>
         where P: AsRef<Path>
     {
-        let leaf = VdevLeaf::create(&path, lbas_per_zone)?;
-        Ok(Self::from_leaf(path, leaf))
+        let device = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
+            .open(&path)?;
+        let sref: &'static fs::File = unsafe { mem::transmute(&device) };
+        let leaf = VdevLeaf::new2(sref);
+        let lbas_per_zone = leaf.lbas_per_zone();
+        let size = leaf.size();
+        let uuid = Uuid::new_v4();
+        let spacemap_space = leaf.spacemap_space();
+        let inner = Arc::new(RwLock::new(Inner {
+            delayed: None,
+            optimum_queue_depth: leaf.optimum_queue_depth(),
+            queue_depth: 0,
+            last_lba: 0,
+            remover: None,
+            syncing: false,
+            after_sync: VecDeque::new(),
+            ahead: BinaryHeap::new(),
+            behind: BinaryHeap::new(),
+            weakself: Weak::new(),
+            leaf,
+            device
+        }));
+        inner.write().unwrap().weakself = Arc::downgrade(&inner);
+        Ok(VdevBlock {
+            inner,
+            size,
+            spacemap_space,
+            lbas_per_zone,
+            uuid,
+            path: path.as_ref().to_owned()
+        })
     }
 
     /// Create a new VdevBlock from already-opened but unlabeled leaf
-    fn from_leaf<P: AsRef<Path>>(path: P, leaf: VdevLeaf) -> Self {
-        let uuid = Uuid::new_v4();
-        let size = leaf.size();
-        let lbas_per_zone = leaf.lbas_per_zone();
-        let path = path.as_ref().to_owned();
-        VdevBlock::new(leaf, path, uuid, size, lbas_per_zone)
-    }
+    //fn from_leaf<P: AsRef<Path>>(path: P, leaf: VdevLeaf) -> Self {
+        //let uuid = Uuid::new_v4();
+        //let size = leaf.size();
+        //let lbas_per_zone = leaf.lbas_per_zone();
+        //let path = path.as_ref().to_owned();
+        //VdevBlock::new(leaf, path, uuid, size, lbas_per_zone)
+    //}
 
     /// Asynchronously erase a zone on a block device
     ///
@@ -845,14 +877,15 @@ impl VdevBlock {
         self.new_fut(block_op, receiver)
     }
 
-    /// Instantiate a new VdevBlock from an existing VdevLeaf
+    /// Instantiate a new VdevBlock from an already formatted VdevLeaf.
+    /// The caller must provide some information found in the label.
     ///
     /// * `path`:          Path at which this Leaf was last found.
+    /// * `device`:        The raw opendevicefile
     /// * `uuid`:          XXX Temporary
     /// * `size`:          TODO describe
     /// * `lbas_per_zone`: Number of LBAs per simulated zone
     fn new(
-        leaf: VdevLeaf<'static>,
         device: fs::File,
         path: PathBuf,
         uuid: Uuid,
@@ -860,6 +893,11 @@ impl VdevBlock {
         lbas_per_zone: LbaT
     ) -> Self
     {
+        // Safe because the Drop impl ensures that any futures based on leaf
+        // will be dropped before device gets dropped.
+        let sref: &'static fs::File = unsafe { mem::transmute(&device) };
+        let mut leaf = VdevLeaf::new2(sref);
+        leaf.set(size, lbas_per_zone);
         let spacemap_space = leaf.spacemap_space();
         let inner = Arc::new(RwLock::new(Inner {
             delayed: None,
@@ -886,9 +924,21 @@ impl VdevBlock {
         }
     }
 
-    //async fn open(pb: PathBuf, f: fs::File) -> Result<(Self, LabelReader)> {
-        //let (leaf, lr) = VdevLeaf::open2(pb, &f).await?;
-        //let size = leaf.size();
+    //async fn open<P: AsRef<Path>>(p: P) -> Result<(Self, LabelReader)> {
+        //let file = OpenOptions::new()
+            //.read(true)
+            //.write(true)
+            //.custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
+            //.open(&p)?;
+        //let mut lr = Self::read_label(&file).await?;
+        //let label: Label = lr.deserialize().unwrap();
+        //let path = p.as_ref().to_path_buf();
+        //let lbas_per_zone = label.lbas_per_zone;
+        //let size = label.lbas;
+        //let uuid = label.uuid;
+        //assert!(leaf.size() >= label.lbas,
+            //"vdev has shrunk since creation");
+        //leaf.set(size, lbas_per_zone);
         //let spacemap_space = leaf.spacemap_space();
         //let inner = Arc::new(RwLock::new(Inner {
             //delayed: None,
@@ -908,7 +958,10 @@ impl VdevBlock {
         //let vb = VdevBlock {
             //inner,
             //size,
-            //spacemap_space
+            //spacemap_space,
+            //lbas_per_zone,
+            //uuid,
+            //path
         //};
         //Ok((vb,lr))
     //}
@@ -1164,11 +1217,14 @@ impl Manager {
             .write(true)
             .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
             .open(&p)?;
-        let path = p.as_ref().to_path_buf();
         let mut lr = Self::read_label(&file).await?;
         let label: Label = lr.deserialize().unwrap();
+        let path = p.as_ref().to_path_buf();
         let importable = ImportableLeaf{file, path};
         self.devices.insert(label.uuid, importable);
+        //let (vdev, lr) = VdevBlock::open(p)?;
+        //let importable = ImportableLeaf{vdev, path};
+        //self.devices.insert(vdev.uuid, importable);
         Ok(lr)
     }
 }

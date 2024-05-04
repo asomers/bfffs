@@ -391,7 +391,7 @@ impl<'fd> VdevFile<'fd> {
         //Ok(vdev)
     }
 
-    pub async fn new2(f: &'fd fs::File) -> Self
+    pub fn new2(f: &'fd fs::File) -> Self
     {
         todo!()
     }
