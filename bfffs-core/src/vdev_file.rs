@@ -558,7 +558,7 @@ impl<'fd> VdevFile<'fd> {
     }
 
     /// Asynchronously write a contiguous portion of the vdev.
-    pub fn write_at(&'fd self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
+    pub fn write_at(&self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
     //pub fn write_at(&'fd self, buf: IoVec, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'fd>>
     {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
@@ -570,7 +570,7 @@ impl<'fd> VdevFile<'fd> {
     // NB: functions like this don't submit to the kernel immediately with
     // aio_write.  They don't do that until polled.  So the return value's
     // lifetime must include both that of the BorrowedFd and self.
-    fn write_at_unchecked(&'fd self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
+    fn write_at_unchecked<'a>(&'a self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
     //fn write_at_unchecked(&'fd self, buf: IoVec, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'fd>>
     {
         let off = lba * (BYTES_PER_LBA as u64);
@@ -585,6 +585,13 @@ impl<'fd> VdevFile<'fd> {
             mem::transmute::<&[u8], &'static [u8]>( buf.as_ref())
         };
         let fut = self.fd.write_at(sbuf, off).unwrap();
+        // Drop the borrow on fut.  We don't actually need it, since three
+        // levels downstack nix::sys::aio::AioCb::common_init does as_raw_fd().
+        // Or to put it another way, tokio_file takes fd by value, so its return
+        // value doesn't need to capture the lifetime of self.  But it's hard
+        // for rustc to understand that.
+        let fut = unsafe { mem::transmute::<_, tokio_file::WriteAt<'fd>>(fut) };
+        //let fut = unsafe { mem::transmute::<tokio_file::WriteAt<'fd + '1>, tokio_file::WriteAt<'fd>>(fut) };
 
         static_assertions::assert_impl_all!(&std::os::unix::io::OwnedFd: Send);
         static_assertions::assert_impl_all!(WriteAt: Send);
