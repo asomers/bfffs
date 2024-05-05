@@ -420,8 +420,10 @@ struct Inner {
     /// reference to `self`, but also require `'static` lifetime.
     weakself: Weak<RwLock<Inner>>,
 
-    /// Underlying device
+    /// Underlying device.
     leaf: VdevLeaf<'static>,
+
+    /// Underlying device file. Must not be changed during Self's lifetime!
     // Must come last, so it drops after fields containing BlockOps
     device: fs::File,
 }

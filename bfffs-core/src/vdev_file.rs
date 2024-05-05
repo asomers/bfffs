@@ -567,6 +567,9 @@ impl<'fd> VdevFile<'fd> {
         //Box::pin(self.write_at_unchecked(buf, lba))
     }
 
+    // NB: functions like this don't submit to the kernel immediately with
+    // aio_write.  They don't do that until polled.  So the return value's
+    // lifetime must include both that of the BorrowedFd and self.
     fn write_at_unchecked(&'fd self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
     //fn write_at_unchecked(&'fd self, buf: IoVec, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'fd>>
     {
