@@ -467,8 +467,7 @@ impl<'fd> VdevFile<'fd> {
     /// Asynchronously read a contiguous portion of the vdev.
     ///
     /// Return the number of bytes actually read.
-    pub fn read_at(&'fd self, mut buf: IoVecMut, lba: LbaT) -> ReadAt<'fd>
-    //pub fn read_at(&self, mut buf: IoVecMut, lba: LbaT) -> impl Future<Output = Result<()>> + Send + Sync + 'fd
+    pub fn read_at(&self, mut buf: IoVecMut, lba: LbaT) -> ReadAt<'fd>
     {
         // Unlike write_at, the upper layers will never read into a buffer that
         // isn't a multiple of a block size.  DDML::read ensures that.
@@ -482,6 +481,12 @@ impl<'fd> VdevFile<'fd> {
             mem::transmute::<&mut[u8], &'static mut [u8]>(buf.as_mut())
         };
         let fut = self.fd.read_at(&mut *bufaddr, off).unwrap();
+        // Drop the borrow on fut.  We don't actually need it, since three
+        // levels downstack nix::sys::aio::AioCb::common_init does as_raw_fd().
+        // Or to put it another way, tokio_file takes fd by value, so its return
+        // value doesn't need to capture the lifetime of self.  But it's hard
+        // for rustc to understand that.
+        let fut = unsafe { mem::transmute::<_, tokio_file::ReadAt<'fd>>(fut) };
         ReadAt { _buf: buf, fut }
     }
 
@@ -491,8 +496,7 @@ impl<'fd> VdevFile<'fd> {
     /// - `buf`:        Place the still-serialized spacemap here.  `buf` will be
     ///                 resized as needed.
     /// * `lba`     LBA to read from
-    pub fn read_spacemap(&'fd self, buf: IoVecMut, lba: LbaT) -> ReadAt<'fd>
-    //pub fn read_spacemap(&'fd self, buf: IoVecMut, idx: u32) -> impl Future<Output = Result<()>> + Send + Sync + 'fd
+    pub fn read_spacemap(&self, buf: IoVecMut, lba: LbaT) -> ReadAt<'fd>
     {
         self.read_at(buf, lba)
     }
@@ -502,38 +506,45 @@ impl<'fd> VdevFile<'fd> {
     /// * `sglist   Scatter-gather list of buffers to receive data
     /// * `lba`     LBA to read from
     #[allow(clippy::transmute_ptr_to_ptr)]  // Clippy false positive
-    pub fn readv_at(&'fd self, mut sglist: SGListMut, lba: LbaT) -> ReadvAt<'fd>
+    pub fn readv_at(&self, mut sglist: SGListMut, lba: LbaT) -> ReadvAt<'fd>
     {
         for iovec in sglist.iter() {
             debug_assert_eq!(iovec.len() % BYTES_PER_LBA, 0);
         }
         let off = lba * (BYTES_PER_LBA as u64);
-        let mut slices: Box<[IoSliceMut<'fd>]> = unsafe {
+        let mut slices: Box<[IoSliceMut<'static>]> = unsafe {
             // Safe because fut's lifetime will be equal to slices's once we
             // move it into the ReadvAt struct.  Also, because sglist is already
             // heap-allocated, so moving it won't change the data's address.
             sglist.iter_mut()
             .map(|b| {
-                let sl = mem::transmute::<&mut [u8], &'fd mut[u8]>(&mut b[..]);
+                let sl = mem::transmute::<&mut [u8], &'static mut[u8]>(&mut b[..]);
                 IoSliceMut::new(sl)
             }).collect::<Vec<_>>()
             .into_boxed_slice()
         };
-        let bufs: &'fd mut [IoSliceMut<'fd>] = unsafe {
+        let bufs: &'static mut [IoSliceMut<'static>] = unsafe {
             // Safe because fut's lifetime will be equal to bufs's once we
-            // move it into the ReadvAt struct.  Also, because slies is already
+            // move it into the ReadvAt struct.  Also, because slices is already
             // heap-allocated, so moving it won't change the data's address.
-            mem::transmute::<&mut[IoSliceMut<'fd>],
-                             &'fd mut [IoSliceMut<'fd>]>(
+            mem::transmute::<&mut[IoSliceMut<'static>],
+                             &'static mut [IoSliceMut<'static>]>(
                 &mut slices
             )
         };
         let fut = self.fd.readv_at(bufs, off).unwrap();
-        ReadvAt {
-            _sglist: sglist,
-            _slices: slices,
-            fut
-        }
+        todo!()
+        //// Drop the borrow on fut.  We don't actually need it, since three
+        //// levels downstack nix::sys::aio::AioCb::common_init does as_raw_fd().
+        //// Or to put it another way, tokio_file takes fd by value, so its return
+        //// value doesn't need to capture the lifetime of self.  But it's hard
+        //// for rustc to understand that.
+        //let fut = unsafe { mem::transmute::<_, tokio_file::ReadvAt<'fd>>(fut) };
+        //ReadvAt {
+            //_sglist: sglist,
+            //_slices: slices,
+            //fut
+        //}
     }
 
     fn reserved_space(&self) -> LbaT {
@@ -559,7 +570,6 @@ impl<'fd> VdevFile<'fd> {
 
     /// Asynchronously write a contiguous portion of the vdev.
     pub fn write_at(&self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
-    //pub fn write_at(&'fd self, buf: IoVec, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'fd>>
     {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
         debug_assert_eq!(buf.len() % BYTES_PER_LBA, 0);
@@ -570,8 +580,7 @@ impl<'fd> VdevFile<'fd> {
     // NB: functions like this don't submit to the kernel immediately with
     // aio_write.  They don't do that until polled.  So the return value's
     // lifetime must include both that of the BorrowedFd and self.
-    fn write_at_unchecked<'a>(&'a self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
-    //fn write_at_unchecked(&'fd self, buf: IoVec, lba: LbaT) -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'fd>>
+    fn write_at_unchecked(&self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
     {
         let off = lba * (BYTES_PER_LBA as u64);
         {
@@ -591,7 +600,6 @@ impl<'fd> VdevFile<'fd> {
         // value doesn't need to capture the lifetime of self.  But it's hard
         // for rustc to understand that.
         let fut = unsafe { mem::transmute::<_, tokio_file::WriteAt<'fd>>(fut) };
-        //let fut = unsafe { mem::transmute::<tokio_file::WriteAt<'fd + '1>, tokio_file::WriteAt<'fd>>(fut) };
 
         static_assertions::assert_impl_all!(&std::os::unix::io::OwnedFd: Send);
         static_assertions::assert_impl_all!(WriteAt: Send);
@@ -621,7 +629,7 @@ impl<'fd> VdevFile<'fd> {
     ///
     /// `label_writer` should already contain the serialized labels of every
     /// vdev stacked on top of this one.
-    pub fn write_label(&'fd self, label_writer: LabelWriter) -> WritevAt<'fd>
+    pub fn write_label(&self, label_writer: LabelWriter) -> WritevAt<'fd>
     {
         let lba = label_writer.lba();
         let sglist = label_writer.into_sglist();
@@ -635,7 +643,7 @@ impl<'fd> VdevFile<'fd> {
     ///
     /// - `sglist`:     Buffers of data to write
     /// * `lba`     LBA to write to
-    pub fn write_spacemap(&'fd self, sglist: SGList, lba: LbaT)
+    pub fn write_spacemap(&self, sglist: SGList, lba: LbaT)
         -> WritevAt<'fd>
     {
         let bytes: u64 = sglist.iter()
@@ -651,13 +659,13 @@ impl<'fd> VdevFile<'fd> {
     ///
     /// * `sglist`  Scatter-gather list of buffers to write
     /// * `lba`     LBA to write to
-    pub fn writev_at(&'fd self, sglist: SGList, lba: LbaT) -> WritevAt<'fd>
+    pub fn writev_at(&self, sglist: SGList, lba: LbaT) -> WritevAt<'fd>
     {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
         self.writev_at_unchecked(sglist, lba)
     }
 
-    fn writev_at_unchecked(&'fd self, sglist: SGList, lba: LbaT)
+    fn writev_at_unchecked(&self, sglist: SGList, lba: LbaT)
         -> WritevAt<'fd>
     {
         let off = lba * (BYTES_PER_LBA as u64);
@@ -676,6 +684,12 @@ impl<'fd> VdevFile<'fd> {
                 }).collect::<Vec<_>>()
                 .into_boxed_slice();
         let fut = self.fd.writev_at(&slices, off).unwrap();
+        // Drop the borrow on fut.  We don't actually need it, since three
+        // levels downstack nix::sys::aio::AioCb::common_init does as_raw_fd().
+        // Or to put it another way, tokio_file takes fd by value, so its return
+        // value doesn't need to capture the lifetime of self.  But it's hard
+        // for rustc to understand that.
+        let fut = unsafe { mem::transmute::<_, tokio_file::WritevAt<'fd>>(fut) };
 
         WritevAt {
             _sglist: sglist,

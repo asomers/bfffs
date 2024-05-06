@@ -444,7 +444,14 @@ impl Inner {
                 {
                     op = op.accumulate(self.pop_op().unwrap());
                 }
-                self.make_fut(op)
+                let (senders, fut) = self.make_fut(op);
+                // Safe because Inner::device never changes and we always drop
+                // all unpolled futures derived from it before we drop it
+                // itself.
+                // XXX it would be nice to have some type-safety guarantee that
+                // Inner::device never changes.
+                let fut = unsafe{ mem::transmute::<_, Pin<Box<VdevFut>>>(fut) };
+                (senders, fut)
             } else {
                 // Ran out of pending operations
                 break;
@@ -535,15 +542,21 @@ impl Inner {
     }
 
     /// Create a future from a BlockOp, but don't spawn it yet
-    fn make_fut(&mut self, block_op: BlockOp)
-        -> (Vec<oneshot::Sender<Result<()>>>, Pin<Box<VdevFut>>) {
+    fn make_fut<'a>(&'a mut self, block_op: BlockOp)
+        -> (
+            Vec<oneshot::Sender<Result<()>>>,
+            Pin<Box<dyn Future<Output=Result<()>> + Send + Sync + 'a>>
+            )
+    {
 
         self.queue_depth += 1;
         let lba = block_op.lba;
 
         // In the context where this is called, we can't return a future.  So we
         // have to spawn it into the event loop manually
-        let fut: Pin<Box<VdevFut>> = match block_op.cmd {
+        let fut: Pin<Box<dyn Future<Output=Result<()>> + Send + Sync + 'a>> =
+            match block_op.cmd
+        {
             Cmd::WriteAt(iovec) => Box::pin(self.leaf.write_at(iovec, lba)),
             Cmd::ReadAt(iovec_mut) => Box::pin(self.leaf.read_at(iovec_mut, lba)),
             Cmd::WritevAt(sglist) => Box::pin(self.leaf.writev_at(sglist, lba)),
