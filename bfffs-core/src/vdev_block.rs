@@ -765,6 +765,10 @@ impl VdevBlock {
         -> io::Result<Self>
         where P: AsRef<Path>
     {
+        // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
+        // block indefinitely.  However, using O_NONBLOCK is worse because it
+        // can cause spurious failures, such as when another thread fork()s.
+        // That happens frequently in the functional tests.
         let device = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1227,6 +1231,10 @@ impl Manager {
     // TODO: add a method for tasting disks in parallel.
     #[cfg(not(test))]
     pub async fn taste<P: AsRef<Path>>(&mut self, p: P) -> Result<LabelReader> {
+        // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
+        // block indefinitely.  However, using O_NONBLOCK is worse because it
+        // can cause spurious failures, such as when another thread fork()s.
+        // That happens frequently in the functional tests.
         let file = OpenOptions::new()
             .read(true)
             .write(true)
