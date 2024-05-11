@@ -4,7 +4,6 @@
 mod basic {
     use bfffs_core::{
         BYTES_PER_LBA,
-        Error,
         vdev::*,
         vdev_file::*
     };
@@ -39,6 +38,7 @@ mod basic {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&filename)
             .unwrap();
         file.set_len(len).unwrap();
@@ -277,14 +277,13 @@ mod dev {
         fs,
         io::{self, Read, Seek, SeekFrom},
         mem,
-        num::NonZeroU64,
         ops::Deref,
     };
 
     struct Harness {
         vdev: VdevFile<'static>,
         file: fs::File,
-        md: Md,
+        _md: Md,
     }
 
     fn harness() -> io::Result<Harness> {
@@ -294,13 +293,14 @@ mod dev {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(md.as_path())
             .unwrap();
         let mut vdev = VdevFile::new(&file)?;
-        vdev.set(vdev.size(), 8192);
+        vdev.set(vdev.size(), zones_per_lba);
         // Safe because vdev will drop before _file
         let vdev = unsafe{ mem::transmute::<VdevFile, VdevFile<'static>>(vdev)};
-        Ok(Harness{vdev, file, md})
+        Ok(Harness{vdev, file, _md: md})
     }
 
     /// For devices that support TRIM, erase_zone should do it.
