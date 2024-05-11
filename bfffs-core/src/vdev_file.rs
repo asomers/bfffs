@@ -212,33 +212,6 @@ impl<'fd> VdevFile<'fd> {
         }
     }
 
-    /// Create a new Vdev, backed by a file
-    ///
-    /// * `path`:           Pathname for the file.  It may be a device node.
-    /// * `lbas_per_zone`:  If specified, this many LBAs will be assigned to
-    ///                     simulated zones on devices that don't have native
-    ///                     zones.
-    pub fn create<P>(path: P, lbas_per_zone: Option<NonZeroU64>)
-        -> io::Result<Self>
-        where P: AsRef<Path>
-    {
-        let pb = path.as_ref().to_path_buf();
-        let mut vdev = VdevFile::new(pb).unwrap();
-        if let Some(x) = lbas_per_zone {
-            vdev.lbas_per_zone = x.get();
-        }
-        Ok(vdev)
-    }
-
-    pub fn create2<P>(path: P, f: &fs::File, lbas_per_zone: Option<NonZeroU64>)
-        -> io::Result<Self>
-        where P: AsRef<Path>
-    {
-        let pb = path.as_ref().to_path_buf();
-        todo!()
-    }
-
-
     /// Asynchronously erase the given zone.
     ///
     /// After this, the zone will be in the empty state.  The data may or may
@@ -342,60 +315,10 @@ impl<'fd> VdevFile<'fd> {
         }
     }
 
-    /// Partially construct a VdevFile.
-    fn new(pb: std::path::PathBuf) -> Result<Self> {
-        todo!()
-        // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
-        // block indefinitely.  However, using O_NONBLOCK is worse because it
-        // can cause spurious failures, such as when another thread fork()s.
-        // That happens frequently in the functional tests.
-        //let f = OpenOptions::new()
-            //.read(true)
-            //.write(true)
-            //.custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
-            //.open(pb.as_path())?;
-        //let md = f.metadata()?;
-        //let ft = md.file_type();
-        //// The preferred (not necessarily minimum) sector size for accessing
-        //// the device
-        //let sectorsize = if ft.is_block_device() || ft.is_char_device() {
-            //let mut sectorsize = mem::MaybeUninit::<u32>::uninit();
-            //let mut stripesize = mem::MaybeUninit::<nix::libc::off_t>::uninit();
-            //let fd = f.as_raw_fd();
-            //unsafe {
-                //// TODO: use stripesize if it's greater than sector size
-                //diocgsectorsize(fd, sectorsize.as_mut_ptr())?;
-                //diocgstripesize(fd, stripesize.as_mut_ptr())?;
-                //if stripesize.assume_init() > 0 {
-                    //stripesize.assume_init() as usize
-                //} else {
-                    //sectorsize.assume_init() as usize
-                //}
-            //}
-        //} else {
-            //1
-        //};
-        //let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
-        //let size = Self::devlen(&f, sectorsize)? / BYTES_PER_LBA as u64;
-        //let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
-        //let nzones = div_roundup(size, lbas_per_zone);
-        //let spacemap_space = spacemap_space(nzones);
-        //let vdev = VdevFile {
-            //erase_method,
-            //file: f,
-            //lbas_per_zone,
-            //path: pb,
-            //size,
-            //spacemap_space,
-            //uuid: Uuid::default()
-        //};
-        //Ok(vdev)
-    }
-
     /// Construct a new VdevFile, with default values for all parameters.  If
     /// there is a label, some of these parameters may need to be overwritten by
     /// [`VdevFile::set`].
-    pub fn new2(f: &'fd fs::File) -> io::Result<Self>
+    pub fn new(f: &'fd fs::File) -> io::Result<Self>
     {
         let md = f.metadata()?;
         let ft = md.file_type();
@@ -430,62 +353,6 @@ impl<'fd> VdevFile<'fd> {
             size,
             erase_method
         })
-    }
-
-    /// Open a Vdev, backed by a file.
-    ///
-    /// * `path`:           Pathname for the file.  It may be a device node.
-    //pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
-        // block indefinitely.  However, using O_NONBLOCK is worse because it
-        // can cause spurious failures, such as when another thread fork()s.
-        // That happens frequently in the functional tests.
-        //let stdfile = OpenOptions::new()
-            //.read(true)
-            //.write(true)
-            //.custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
-            //.open(path)
-            //.map_err(|e| Error::from_i32(e.raw_os_error().unwrap()).unwrap())?;
-        //let f = File::new(stdfile);
-        //let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
-        //let size = f.len().unwrap() / BYTES_PER_LBA as u64;
-        //let nzones = div_roundup(size, lbas_per_zone);
-        //let spacemap_space = spacemap_space(nzones);
-        //let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
-        //let vdev = VdevFile {
-            //file: f,
-            //spacemap_space,
-            //lbas_per_zone,
-            //size,
-            //erase_method
-        //};
-        //Ok(vdev)
-    //}
-
-    /// Returns both a new `VdevFile` object, and a `LabelReader` that may be
-    /// used to construct other vdevs stacked on top of this one.
-    ///
-    /// * `path`    Pathname for the file.  It may be a device node.
-    //pub async fn open<P: AsRef<Path>>(path: P)
-        //-> Result<(Self, LabelReader)>
-    //{
-        //let pb = path.as_ref().to_path_buf();
-        //let mut vdev = Self::new(pb)?;
-        //let mut label_reader = VdevFile::read_label(&vdev.file).await?;
-        //let label: Label = label_reader.deserialize().unwrap();
-        //assert!(vdev.size >= label.lbas,
-                //"Vdev has shrunk since creation");
-        //vdev.spacemap_space = label.spacemap_space;
-        //vdev.lbas_per_zone = label.lbas_per_zone;
-        //vdev.size = label.lbas;
-        //vdev.uuid = label.uuid;
-        //Ok((vdev, label_reader))
-    //}
-
-    pub async fn open2(pb: std::path::PathBuf, f: &fs::File)
-        -> Result<(Self, LabelReader)>
-    {
-        todo!()
     }
 
     /// Asynchronously open the given zone.
@@ -817,20 +684,15 @@ impl<'a> Future for WritevAt<'a> {
 #[cfg(test)]
 mock!{
     pub VdevFile {
-        #[mockall::concretize]
-        pub fn create<P>(path: P, lbas_per_zone: Option<NonZeroU64>)
-            -> io::Result<Self>
-            where P: AsRef<Path>;
         pub fn erase_zone(&self, start: LbaT, end: LbaT) -> BoxVdevFut;
         pub fn finish_zone(&self, _lba: LbaT) -> BoxVdevFut;
         pub fn lbas_per_zone(&self) -> LbaT;
-        #[mockall::concretize]
-        pub async fn open<P>(path: P) -> Result<Self> where P: AsRef<Path>;
+        pub fn new(f: &fs::File) -> io::Result<Self>;
         pub fn open_zone(&self, _lba: LbaT) -> BoxVdevFut;
         pub fn read_at(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut;
         pub fn read_spacemap(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut;
         pub fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> BoxVdevFut;
-        pub fn set(&mut self, size: LbaT);
+        pub fn set(&mut self, size: LbaT, lbas_per_zone: LbaT);
         pub fn spacemap_space(&self) -> LbaT;
         pub fn write_at(&self, buf: IoVec, lba: LbaT) -> BoxVdevFut;
         pub fn write_label(&self, mut label_writer: LabelWriter) -> BoxVdevFut;

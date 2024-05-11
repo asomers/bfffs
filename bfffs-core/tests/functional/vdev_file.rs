@@ -43,7 +43,7 @@ mod basic {
             .unwrap();
         file.set_len(len).unwrap();
         let pb = filename.to_path_buf();
-        let vdev = VdevFile::new2(&file).unwrap();
+        let vdev = VdevFile::new(&file).unwrap();
         // Safe because vdev will drop before _file
         let vdev = unsafe{ mem::transmute::<VdevFile, VdevFile<'static>>(vdev)};
         Harness{file, vdev, path: pb, _tempdir: tempdir}
@@ -296,7 +296,7 @@ mod dev {
             .create(true)
             .open(md.as_path())
             .unwrap();
-        let mut vdev = VdevFile::new2(&file)?;
+        let mut vdev = VdevFile::new(&file)?;
         vdev.set(vdev.size(), 8192);
         // Safe because vdev will drop before _file
         let vdev = unsafe{ mem::transmute::<VdevFile, VdevFile<'static>>(vdev)};

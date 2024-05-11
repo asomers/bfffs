@@ -421,7 +421,10 @@ struct Inner {
     weakself: Weak<RwLock<Inner>>,
 
     /// Underlying device.
+    #[cfg(not(test))]
     leaf: VdevLeaf<'static>,
+    #[cfg(test)]
+    leaf: VdevLeaf,
 
     /// Underlying device file. Must not be changed during Self's lifetime!
     // Must come last, so it drops after fields containing BlockOps
@@ -775,7 +778,7 @@ impl VdevBlock {
             .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
             .open(&path)?;
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
-        let leaf = VdevLeaf::new2(sref)?;
+        let leaf = VdevLeaf::new(sref)?;
         let lbas_per_zone = leaf.lbas_per_zone();
         let size = leaf.size();
         let uuid = Uuid::new_v4();
@@ -803,6 +806,39 @@ impl VdevBlock {
             uuid,
             path: path.as_ref().to_owned()
         })
+    }
+
+    /// Constructor from a mock VdevLeaf, for unit testing
+    #[cfg(test)]
+    fn from_leaf(leaf: MockVdevFile) -> Self {
+        let device = fs::File::open("/dev/null").unwrap();
+        let lbas_per_zone = leaf.lbas_per_zone();
+        let size = leaf.size();
+        let uuid = Uuid::new_v4();
+        let spacemap_space = leaf.spacemap_space();
+        let inner = Arc::new(RwLock::new(Inner {
+            delayed: None,
+            optimum_queue_depth: leaf.optimum_queue_depth(),
+            queue_depth: 0,
+            last_lba: 0,
+            remover: None,
+            syncing: false,
+            after_sync: VecDeque::new(),
+            ahead: BinaryHeap::new(),
+            behind: BinaryHeap::new(),
+            weakself: Weak::new(),
+            leaf,
+            device
+        }));
+        inner.write().unwrap().weakself = Arc::downgrade(&inner);
+        VdevBlock {
+            inner,
+            size,
+            spacemap_space,
+            lbas_per_zone,
+            uuid,
+            path: PathBuf::new()
+        }
     }
 
     /// Create a new VdevBlock from already-opened but unlabeled leaf
@@ -915,7 +951,7 @@ impl VdevBlock {
         // Safe because the Drop impl ensures that any futures based on leaf
         // will be dropped before device gets dropped.
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
-        let mut leaf = VdevLeaf::new2(sref).unwrap();
+        let mut leaf = VdevLeaf::new(sref).unwrap();
         leaf.set(size, lbas_per_zone);
         let spacemap_space = leaf.spacemap_space();
         let inner = Arc::new(RwLock::new(Inner {
@@ -1811,7 +1847,7 @@ mod t {
         }
 
         fn partial_leaf() -> MockVdevFile {
-            let mut leaf = MockVdevFile::new();
+            let mut leaf = MockVdevFile::default();
             leaf.expect_size()
                 .once()
                 .return_const(262_144u64);
@@ -1882,7 +1918,7 @@ mod t {
                 let rbuf0 = dbs0.try_mut().unwrap();
                 let rbuf1 = dbs1.try_mut().unwrap();
                 let rbuf2 = dbs2.try_mut().unwrap();
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf1);
+                let vdev = VdevBlock::from_leaf(leaf1);
 
                 let mut ctx = noop_context();
                 // VdevBlock will issue the first operation immediately.
@@ -1950,7 +1986,7 @@ mod t {
                 let dbs1 = DivBufShared::from(vec![0u8; 4096]);
                 let rbuf0 = dbs0.try_mut().unwrap();
                 let rbuf1 = dbs1.try_mut().unwrap();
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
 
                 let f0 = vdev.read_at(rbuf0, 1);
                 let f1 = vdev.read_at(rbuf1, 3);
@@ -1985,7 +2021,7 @@ mod t {
                     });
                 let dbs = DivBufShared::from(vec![0u8; 4096]);
                 let rbuf = dbs.try_mut().unwrap();
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
 
                 vdev.read_at(rbuf, 1).await.unwrap();
             }
@@ -2017,7 +2053,7 @@ mod t {
                 let dbs1 = DivBufShared::from(vec![0u8; 4096]);
                 let rbuf0 = dbs0.try_mut().unwrap();
                 let rbuf1 = dbs1.try_mut().unwrap();
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
 
                 let f0 = vdev.read_at(rbuf0, 1);
                 let f1 = vdev.read_at(rbuf1, 3);
@@ -2065,7 +2101,7 @@ mod t {
                     .return_once(|_, _| Box::pin(penultimate_fut));
                 let dbs = DivBufShared::from(vec![0u8; 4096]);
                 let wbuf = dbs.try_const().unwrap();
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
 
                 let mut ctx = noop_context();
                 // First schedule all operations.  There are too many to
@@ -2118,7 +2154,7 @@ mod t {
                 .with(eq(start), eq(end))
                 .returning(|_,_| Box::pin(future::ok::<(), Error>(())));
 
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.erase_zone(start, end).await.unwrap();
         }
@@ -2130,7 +2166,7 @@ mod t {
                 .with(eq(1))
                 .returning(|_| Box::pin(future::ok::<(), Error>(())));
 
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.finish_zone(1, (1 << 16) - 1).await.unwrap();
         }
@@ -2142,7 +2178,7 @@ mod t {
                 .with(eq(1))
                 .returning(|_| Box::pin(future::ok::<(), Error>(())));
 
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.open_zone(1).await.unwrap();
         }
@@ -2157,7 +2193,7 @@ mod t {
 
             let dbs0 = DivBufShared::from(vec![0u8; 4096]);
             let rbuf0 = dbs0.try_mut().unwrap();
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.read_at(rbuf0, 2).await.unwrap();
         }
@@ -2172,7 +2208,7 @@ mod t {
 
             let dbs0 = DivBufShared::from(vec![0u8; 4096]);
             let rbuf0 = dbs0.try_mut().unwrap();
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             assert_eq!(vdev.read_at(rbuf0, 2).await.unwrap_err(), Error::EIO);
         }
@@ -2197,7 +2233,7 @@ mod t {
 
             let dbs0 = DivBufShared::from(vec![0u8; 4096]);
             let rbuf0 = dbs0.try_mut().unwrap();
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             assert_eq!(vdev.read_at(rbuf0, 2).await.unwrap_err(), Error::EIO);
         }
@@ -2212,7 +2248,7 @@ mod t {
 
             let dbs0 = DivBufShared::from(vec![0u8; 4096]);
             let rbuf0 = vec![dbs0.try_mut().unwrap()];
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.readv_at(rbuf0, 2).await.unwrap();
         }
@@ -2234,7 +2270,7 @@ mod t {
                 let mut ctx = noop_context();
                 let dbs = DivBufShared::from(vec![0u8; 4096]);
                 let wbuf = dbs.try_const().unwrap();
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
 
                 // The first operation does not return immediately
                 let mut f0 = pin!(vdev.write_at(wbuf, 1));
@@ -2255,7 +2291,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn no_backlog(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 vdev.remove().await;
             }
 
@@ -2281,7 +2317,7 @@ mod t {
 
                 let mut ctx = noop_context();
                 let dbs = DivBufShared::from(vec![0u8; 4096]);
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf1);
+                let vdev = VdevBlock::from_leaf(leaf1);
 
                 // The first operation does not return immediately
                 let mut f0 = pin!(vdev.write_at(dbs.try_const().unwrap(), 1));
@@ -2337,7 +2373,7 @@ mod t {
 
                 let mut ctx = noop_context();
                 let dbs = DivBufShared::from(vec![0u8; 4096]);
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf1);
+                let vdev = VdevBlock::from_leaf(leaf1);
 
                 // The first operation does not return immediately
                 let mut f0 = pin!(vdev.write_at(dbs.try_const().unwrap(), 1));
@@ -2373,7 +2409,7 @@ mod t {
             // to highest, then start over at lowest)
             #[rstest]
             fn data(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let mut inner = vdev.inner.write().unwrap();
                 let dummy_dbs = DivBufShared::from(vec![0; 4096]);
                 let dummy_buffer = dummy_dbs.try_const().unwrap();
@@ -2426,7 +2462,7 @@ mod t {
             // that zone
             #[rstest]
             fn erase_zone(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let mut inner = vdev.inner.write().unwrap();
                 let dummy_dbs = DivBufShared::from(vec![0; 12288]);
                 let mut dummy = dummy_dbs.try_mut().unwrap();
@@ -2476,7 +2512,7 @@ mod t {
             // that zone
             #[rstest]
             fn finish_zone(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let mut inner = vdev.inner.write().unwrap();
                 let dummy_dbs = DivBufShared::from(vec![0; 4096]);
                 let dummy = dummy_dbs.try_const().unwrap();
@@ -2528,7 +2564,7 @@ mod t {
             // that zone
             #[rstest]
             fn open_zone(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let mut inner = vdev.inner.write().unwrap();
                 let dummy_dbs = DivBufShared::from(vec![0; 4096]);
                 let dummy = dummy_dbs.try_const().unwrap();
@@ -2583,7 +2619,7 @@ mod t {
             // after all previous commands and before all subsequent commands
             #[rstest]
             fn sync_all(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let mut inner = vdev.inner.write().unwrap();
                 let dummy_dbs = DivBufShared::from(vec![0; 4096]);
                 let dummy_buffer = dummy_dbs.try_const().unwrap();
@@ -2631,7 +2667,7 @@ mod t {
             leaf.expect_sync_all()
                 .returning(|| Box::pin(future::ok::<(), Error>(())));
 
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.sync_all().await.unwrap();
         }
@@ -2647,7 +2683,7 @@ mod t {
 
             let dbs = DivBufShared::from(vec![0u8; 4096]);
             let wbuf = dbs.try_const().unwrap();
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.write_at(wbuf, 1).await.unwrap();
         }
@@ -2663,7 +2699,7 @@ mod t {
 
             let dbs = DivBufShared::from(vec![0u8; 4096]);
             let wbuf = dbs.try_const().unwrap();
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             assert_eq!(Err(Error::ENXIO), vdev.write_at(wbuf, 1).await);
         }
@@ -2691,7 +2727,7 @@ mod t {
 
             let dbs = DivBufShared::from(vec![0u8; 4096]);
             let wbuf = dbs.try_const().unwrap();
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             assert_eq!(Err(Error::ENXIO), vdev.write_at(wbuf, 1).await);
         }
@@ -2706,7 +2742,7 @@ mod t {
 
             let dbs = DivBufShared::from(vec![0u8; 4096]);
             let wbuf = vec![dbs.try_const().unwrap()];
-            let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+            let vdev = VdevBlock::from_leaf(leaf);
 
             vdev.writev_at(wbuf, 1).await.unwrap();
         }
@@ -2720,7 +2756,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn pad_small_tail(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 4096]);
                 let dbs1 = DivBufShared::from(vec![1u8; 3072]);
                 let wbuf0 = dbs0.try_const().unwrap();
@@ -2745,7 +2781,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn copy_two_iovecs(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 1024]);
                 let dbs1 = DivBufShared::from(vec![1u8; 3072]);
                 let wbuf0 = dbs0.try_const().unwrap();
@@ -2764,7 +2800,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn copy_three_iovecs(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 1024]);
                 let dbs1 = DivBufShared::from(vec![1u8; 2050]);
                 let dbs2 = DivBufShared::from(vec![2u8; 1022]);
@@ -2786,7 +2822,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn copy_first_two_iovecs(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 1024]);
                 let dbs1 = DivBufShared::from(vec![1u8; 3072]);
                 let dbs2 = DivBufShared::from(vec![2u8; 4096]);
@@ -2810,7 +2846,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn copy_last_two_iovecs(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 4096]);
                 let dbs1 = DivBufShared::from(vec![1u8; 3072]);
                 let dbs2 = DivBufShared::from(vec![2u8; 1024]);
@@ -2834,7 +2870,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn copy_tail_of_iovec(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 5120]);
                 let dbs1 = DivBufShared::from(vec![1u8; 3072]);
                 let wbuf0 = dbs0.try_const().unwrap();
@@ -2857,7 +2893,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn pad_large_tail(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 4096]);
                 let dbs1 = DivBufShared::from(vec![1u8; 7168]);
                 let wbuf0 = dbs0.try_const().unwrap();
@@ -2882,7 +2918,7 @@ mod t {
             #[rstest]
             #[tokio::test]
             async fn pad_small_tail(leaf: MockVdevFile) {
-                let vdev = VdevBlock::from_leaf("/dev/whatever", leaf);
+                let vdev = VdevBlock::from_leaf(leaf);
                 let dbs0 = DivBufShared::from(vec![0u8; 4096]);
                 let dbs1 = DivBufShared::from(vec![1u8; 3072]);
                 let wbuf0 = dbs0.try_const().unwrap();
