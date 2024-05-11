@@ -6,7 +6,7 @@ use futures::{
     channel::oneshot,
     task::{Context, Poll}
 };
-#[cfg(not(test))] use futures::{TryFutureExt, future};
+use futures::{TryFutureExt, future};
 use lazy_static::lazy_static;
 use nix::unistd::{sysconf, SysconfVar};
 use pin_project::pin_project;
@@ -1210,7 +1210,6 @@ pub struct Manager {
 
 impl Manager {
     /// Import a block device that is already known to exist
-    #[cfg(not(test))]
     pub fn import(&mut self, uuid: Uuid)
         -> impl Future<Output=Result<(VdevBlock, LabelReader)>>
     {
