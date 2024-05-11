@@ -332,7 +332,7 @@ impl<'fd> VdevFile<'fd> {
             1
         };
         let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
-        let size = Self::devlen(&f, sectorsize)? / BYTES_PER_LBA as u64;
+        let size = Self::devlen(f, sectorsize)? / BYTES_PER_LBA as u64;
         let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
         let nzones = div_roundup(size, lbas_per_zone);
         let spacemap_space = spacemap_space(nzones);
@@ -448,7 +448,7 @@ impl<'fd> VdevFile<'fd> {
 
     /// Sync the `Vdev`, ensuring that all data written so far reaches stable
     /// storage.
-    pub fn sync_all<'a>(&'a self) -> VdevFileFut<'a>
+    pub fn sync_all(&self) -> VdevFileFut
     {
         let fut = AioFileExt::sync_all(&self.fd).unwrap()
             .map_ok(drop)
