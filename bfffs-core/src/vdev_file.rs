@@ -21,18 +21,16 @@ use nix::libc::{c_int, off_t};
 use pin_project::pin_project;
 use std::{
     borrow::Borrow,
-    fs::{self, OpenOptions},
+    fs,
     io::{self, IoSlice, IoSliceMut},
     mem::{self, MaybeUninit},
-    num::NonZeroU64,
     os::{
         fd::AsFd,
         unix::{
-            fs::{FileTypeExt, OpenOptionsExt},
+            fs::FileTypeExt,
             io::{AsRawFd, BorrowedFd, RawFd}
         },
     },
-    path::Path,
     pin::Pin,
     sync::atomic::Ordering
 };

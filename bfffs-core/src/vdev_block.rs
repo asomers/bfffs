@@ -18,10 +18,7 @@ use std::{
     io,
     mem,
     num::{NonZeroU64, NonZeroUsize},
-    os::{
-        fd::AsFd,
-        unix::fs::OpenOptionsExt
-    },
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, RwLock, Weak},
@@ -425,7 +422,7 @@ struct Inner {
 
     /// Underlying device file. Must not be changed during Self's lifetime!
     // Must come last, so it drops after fields containing BlockOps
-    device: fs::File,
+    _device: fs::File,
 }
 
 impl Inner {
@@ -776,7 +773,9 @@ impl VdevBlock {
             .open(&path)?;
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
         let leaf = VdevLeaf::new(sref)?;
-        let lbas_per_zone = leaf.lbas_per_zone();
+        let lbas_per_zone = lbas_per_zone
+            .map(NonZeroU64::get)
+            .unwrap_or(leaf.lbas_per_zone());
         let size = leaf.size();
         let uuid = Uuid::new_v4();
         let spacemap_space = leaf.spacemap_space();
@@ -792,7 +791,7 @@ impl VdevBlock {
             behind: BinaryHeap::new(),
             weakself: Weak::new(),
             leaf,
-            device
+            _device: device
         }));
         inner.write().unwrap().weakself = Arc::downgrade(&inner);
         Ok(VdevBlock {
@@ -963,7 +962,7 @@ impl VdevBlock {
             behind: BinaryHeap::new(),
             weakself: Weak::new(),
             leaf,
-            device
+            _device: device
         }));
         inner.write().unwrap().weakself = Arc::downgrade(&inner);
         VdevBlock {
