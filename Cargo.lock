@@ -1579,6 +1579,7 @@ dependencies = [
 [[package]]
 name = "mio-aio"
 version = "0.8.0"
+source = "git+https://github.com/asomers/mio-aio.git?rev=def63990b10#def63990b10203d3b63059e9a8858f78b61b26f9"
 dependencies = [
  "mio",
  "nix",
@@ -1633,6 +1634,7 @@ checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
 [[package]]
 name = "nix"
 version = "0.28.0"
+source = "git+https://github.com/asomers/nix.git?rev=6df57c72#6df57c72060d63baa1d817a252d41070274073d8"
 dependencies = [
  "bitflags 2.4.0",
  "cfg-if",
@@ -2617,6 +2619,7 @@ dependencies = [
 [[package]]
 name = "tokio-file"
 version = "0.9.0"
+source = "git+https://github.com/asomers/tokio-file.git?rev=bc24a7438d3#bc24a7438d338ea534855d7e4a83b4087830c51f"
 dependencies = [
  "futures",
  "mio",
