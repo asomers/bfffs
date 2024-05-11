@@ -87,11 +87,6 @@ pub trait Vdev {
     /// not change within the lifetime of a Vdev.
     fn size(&self) -> LbaT;
 
-    /// Sync the `Vdev`, ensuring that all data written so far reaches stable
-    /// storage.
-    fn sync_all<'a>(&'a self)
-        -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>;
-
     /// Return the first and last LBAs of a zone.
     ///
     /// The end LBA is *exclusive*; it is the first LBA that is *not* in the

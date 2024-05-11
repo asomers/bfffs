@@ -168,14 +168,6 @@ impl<'fd> Vdev for VdevFile<'fd> {
         self.size
     }
 
-    fn sync_all<'a>(&'a self) -> VdevFileFut<'a>
-    {
-        let fut = AioFileExt::sync_all(&self.fd).unwrap()
-            .map_ok(drop)
-            .map_err(Error::from);
-        Box::pin(fut)
-    }
-
     fn zone_limits(&self, zone: ZoneT) -> (LbaT, LbaT) {
         if zone == 0 {
             (self.reserved_space(), self.lbas_per_zone)
@@ -456,6 +448,16 @@ impl<'fd> VdevFile<'fd> {
         self.lbas_per_zone = lbas_per_zone;
     }
 
+    /// Sync the `Vdev`, ensuring that all data written so far reaches stable
+    /// storage.
+    pub fn sync_all<'a>(&'a self) -> VdevFileFut<'a>
+    {
+        let fut = AioFileExt::sync_all(&self.fd).unwrap()
+            .map_ok(drop)
+            .map_err(Error::from);
+        Box::pin(fut)
+    }
+
     /// Asynchronously write a contiguous portion of the vdev.
     pub fn write_at(&'fd self, buf: IoVec, lba: LbaT) -> VdevFileFut<'fd>
     {
@@ -694,6 +696,7 @@ mock!{
         pub fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> BoxVdevFut;
         pub fn set(&mut self, size: LbaT, lbas_per_zone: LbaT);
         pub fn spacemap_space(&self) -> LbaT;
+        pub fn sync_all<'a>(&'a self) -> VdevFileFut<'a>;
         pub fn write_at(&self, buf: IoVec, lba: LbaT) -> BoxVdevFut;
         pub fn write_label(&self, mut label_writer: LabelWriter) -> BoxVdevFut;
         pub fn write_spacemap(&self, buf: SGList, lba: LbaT) -> BoxVdevFut;
@@ -703,7 +706,6 @@ mock!{
         fn lba2zone(&self, lba: LbaT) -> Option<ZoneT>;
         fn optimum_queue_depth(&self) -> u32;
         fn size(&self) -> LbaT;
-        fn sync_all(&self) -> BoxVdevFut;
         fn zone_limits(&self, zone: ZoneT) -> (LbaT, LbaT);
         fn zones(&self) -> ZoneT;
     }

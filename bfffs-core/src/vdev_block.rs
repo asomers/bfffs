@@ -1092,6 +1092,14 @@ impl VdevBlock {
         }
     }
 
+    /// Asynchronously sync the underlying device, ensuring that all data
+    /// reaches stable storage
+    pub fn sync_all(&self) -> BoxVdevFut {
+        let (sender, receiver) = oneshot::channel::<Result<()>>();
+        let block_op = BlockOp::sync_all(sender);
+        Box::pin(self.new_fut(block_op, receiver))
+    }
+
     pub fn uuid(&self) -> Uuid {
         self.uuid
     }
@@ -1165,14 +1173,6 @@ impl Vdev for VdevBlock {
 
     fn size(&self) -> LbaT {
         self.size
-    }
-
-    /// Asynchronously sync the underlying device, ensuring that all data
-    /// reaches stable storage
-    fn sync_all(&self) -> BoxVdevFut {
-        let (sender, receiver) = oneshot::channel::<Result<()>>();
-        let block_op = BlockOp::sync_all(sender);
-        Box::pin(self.new_fut(block_op, receiver))
     }
 
     fn zone_limits(&self, zone: ZoneT) -> (LbaT, LbaT) {
@@ -1313,6 +1313,7 @@ mock! {
         pub fn read_spacemap(&self, buf: IoVecMut, idx: u32) -> BoxVdevFut;
         pub fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> BoxVdevFut;
         pub fn status(&self) -> Status;
+        pub fn sync_all(&self) -> BoxVdevFut;
         pub fn uuid(&self) -> Uuid;
         pub fn write_at(&self, buf: IoVec, lba: LbaT) -> BoxVdevFut;
         pub fn write_label(&self, labeller: LabelWriter) -> BoxVdevFut;
@@ -1324,7 +1325,6 @@ mock! {
         fn lba2zone(&self, lba: LbaT) -> Option<ZoneT>;
         fn optimum_queue_depth(&self) -> u32;
         fn size(&self) -> LbaT;
-        fn sync_all(&self) -> BoxVdevFut;
         fn zone_limits(&self, zone: ZoneT) -> (LbaT, LbaT);
         fn zones(&self) -> ZoneT;
     }
