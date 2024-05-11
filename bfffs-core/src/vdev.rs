@@ -6,6 +6,7 @@ use std::{
     pin::Pin
 };
 use serde_derive::{Deserialize, Serialize};
+use futures::Future;
 use crate::types::*;
 
 /// Represents the health of a vdev or pool
@@ -50,10 +51,10 @@ impl fmt::Display for Health {
 }
 
 /// Future representing an operation on a vdev.
-pub type VdevFut = dyn futures::Future<Output = Result<()>> + Send + Sync;
+pub type VdevFut = dyn Future<Output = Result<()>> + Send + Sync;
 
 /// Boxed `VdevFut`
-pub type BoxVdevFut = Pin<Box<dyn futures::Future<Output = Result<()>> + Send + Sync>>;
+pub type BoxVdevFut = Pin<Box<dyn Future<Output = Result<()>> + Send + Sync>>;
 
 /// Vdev: Virtual Device
 ///
@@ -88,7 +89,8 @@ pub trait Vdev {
 
     /// Sync the `Vdev`, ensuring that all data written so far reaches stable
     /// storage.
-    fn sync_all<'a>(&'a self) -> Pin<Box<dyn futures::Future<Output = Result<()>> + Send + Sync + 'a>>; 
+    fn sync_all<'a>(&'a self)
+        -> Pin<Box<dyn Future<Output = Result<()>> + Send + Sync + 'a>>;
 
     /// Return the first and last LBAs of a zone.
     ///
