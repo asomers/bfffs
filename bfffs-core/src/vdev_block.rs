@@ -771,7 +771,7 @@ impl VdevBlock {
             .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
             .open(&path)?;
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
-        let leaf = VdevLeaf::new2(sref);
+        let leaf = VdevLeaf::new2(sref)?;
         let lbas_per_zone = leaf.lbas_per_zone();
         let size = leaf.size();
         let uuid = Uuid::new_v4();
@@ -911,7 +911,7 @@ impl VdevBlock {
         // Safe because the Drop impl ensures that any futures based on leaf
         // will be dropped before device gets dropped.
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
-        let mut leaf = VdevLeaf::new2(sref);
+        let mut leaf = VdevLeaf::new2(sref).unwrap();
         leaf.set(size, lbas_per_zone);
         let spacemap_space = leaf.spacemap_space();
         let inner = Arc::new(RwLock::new(Inner {

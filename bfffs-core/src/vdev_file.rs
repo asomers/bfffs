@@ -52,7 +52,7 @@ enum EraseMethod {
 
 impl AtomicEraseMethod {
     /// Get the initial erase method.
-    fn initial(fd: RawFd) -> Result<Self> {
+    fn initial(fd: RawFd) -> io::Result<Self> {
         if VdevFile::candelete(fd)? {
             // The file supports DIOCGDELETE.
             Ok(AtomicEraseMethod::new(EraseMethod::Diocgdelete))
@@ -194,7 +194,7 @@ impl<'fd> VdevFile<'fd> {
     /// Size of a simulated zone
     const DEFAULT_LBAS_PER_ZONE: LbaT = 1 << 16;  // 256 MB
 
-    fn candelete(fd: RawFd) -> Result<bool> {
+    fn candelete(fd: RawFd) -> io::Result<bool> {
         let mut arg = MaybeUninit::<diocgattr_arg>::uninit();
         let r = unsafe {
             let p = arg.as_mut_ptr();
@@ -208,7 +208,7 @@ impl<'fd> VdevFile<'fd> {
             // DIOCGDELETE either.
             Ok(false)
         } else {
-            r
+            r.map_err(|e| io::Error::from_raw_os_error(e.into()))
         }
     }
 
@@ -392,9 +392,44 @@ impl<'fd> VdevFile<'fd> {
         //Ok(vdev)
     }
 
-    pub fn new2(f: &'fd fs::File) -> Self
+    /// Construct a new VdevFile, with default values for all parameters.  If
+    /// there is a label, some of these parameters may need to be overwritten by
+    /// [`VdevFile::set`].
+    pub fn new2(f: &'fd fs::File) -> io::Result<Self>
     {
-        todo!()
+        let md = f.metadata()?;
+        let ft = md.file_type();
+        // The preferred (not necessarily minimum) sector size for accessing
+        // the device
+        let sectorsize = if ft.is_block_device() || ft.is_char_device() {
+            let mut sectorsize = mem::MaybeUninit::<u32>::uninit();
+            let mut stripesize = mem::MaybeUninit::<nix::libc::off_t>::uninit();
+            let fd = f.as_raw_fd();
+            unsafe {
+                // TODO: use stripesize if it's greater than sector size
+                diocgsectorsize(fd, sectorsize.as_mut_ptr())?;
+                diocgstripesize(fd, stripesize.as_mut_ptr())?;
+                if stripesize.assume_init() > 0 {
+                    stripesize.assume_init() as usize
+                } else {
+                    sectorsize.assume_init() as usize
+                }
+            }
+        } else {
+            1
+        };
+        let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
+        let size = Self::devlen(&f, sectorsize)? / BYTES_PER_LBA as u64;
+        let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
+        let nzones = div_roundup(size, lbas_per_zone);
+        let spacemap_space = spacemap_space(nzones);
+        Ok(VdevFile {
+            fd: f.as_fd(),
+            spacemap_space,
+            lbas_per_zone,
+            size,
+            erase_method
+        })
     }
 
     /// Open a Vdev, backed by a file.
