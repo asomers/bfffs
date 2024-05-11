@@ -824,7 +824,7 @@ impl VdevBlock {
             behind: BinaryHeap::new(),
             weakself: Weak::new(),
             leaf,
-            device
+            _device: device
         }));
         inner.write().unwrap().weakself = Arc::downgrade(&inner);
         VdevBlock {
