@@ -450,7 +450,9 @@ impl Inner {
                 // itself.
                 // XXX it would be nice to have some type-safety guarantee that
                 // Inner::device never changes.
-                let fut = unsafe{ mem::transmute::<_, Pin<Box<VdevFut>>>(fut) };
+                let fut = unsafe{
+                    mem::transmute::<VdevFileFut, Pin<Box<VdevFut>>>(fut)
+                };
                 (senders, fut)
             } else {
                 // Ran out of pending operations
