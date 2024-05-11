@@ -13,8 +13,7 @@ use pin_project::pin_project;
 use serde_derive::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::BinaryHeap,
-    collections::VecDeque,
+    collections::{BinaryHeap, BTreeMap, VecDeque},
     fs::{self, OpenOptions},
     io,
     mem,
@@ -29,8 +28,6 @@ use std::{
     ops,
     time,
 };
-#[cfg(not(test))]
-use std::collections::BTreeMap;
 use tokio_file::AioFileExt;
 #[cfg(test)] use mockall::*;
 
@@ -1197,7 +1194,6 @@ pub struct Label {
 }
 
 /// Holds a VdevLeaf that has already been tasted
-#[cfg(not(test))]
 struct ImportableLeaf {
     file: fs::File,
     /// The path at which this leaf was last seen.  It may change.
@@ -1207,7 +1203,6 @@ struct ImportableLeaf {
 /// Manage BFFFS-formatted disks that aren't yet part of an imported pool.
 #[derive(Default)]
 pub struct Manager {
-    #[cfg(not(test))]
     devices: BTreeMap<Uuid, ImportableLeaf>,
 }
 
@@ -1229,7 +1224,6 @@ impl Manager {
     }
 
     /// Read just one of a vdev's labels
-    #[cfg(not(test))]
     async fn read_label(f: &fs::File) -> Result<LabelReader>
     {
         let mut r = Err(Error::EDOOFUS);    // Will get overridden
@@ -1265,7 +1259,6 @@ impl Manager {
     /// If present, retain the device in the `Manager` for use as a spare or
     /// for building Pools.
     // TODO: add a method for tasting disks in parallel.
-    #[cfg(not(test))]
     pub async fn taste<P: AsRef<Path>>(&mut self, p: P) -> Result<LabelReader> {
         // NB: Annoyingly, using O_EXLOCK without O_NONBLOCK means that we can
         // block indefinitely.  However, using O_NONBLOCK is worse because it
