@@ -554,21 +554,19 @@ impl Inner {
 
         // In the context where this is called, we can't return a future.  So we
         // have to spawn it into the event loop manually
-        let fut: Pin<Box<dyn Future<Output=Result<()>> + Send + Sync + 'a>> =
-            match block_op.cmd
-        {
-            Cmd::WriteAt(iovec) => Box::pin(self.leaf.write_at(iovec, lba)),
-            Cmd::ReadAt(iovec_mut) => Box::pin(self.leaf.read_at(iovec_mut, lba)),
-            Cmd::WritevAt(sglist) => Box::pin(self.leaf.writev_at(sglist, lba)),
+        let fut: VdevFileFut = match block_op.cmd {
+            Cmd::WriteAt(iovec) => self.leaf.write_at(iovec, lba),
+            Cmd::ReadAt(iovec_mut) => self.leaf.read_at(iovec_mut, lba),
+            Cmd::WritevAt(sglist) => self.leaf.writev_at(sglist, lba),
             Cmd::ReadSpacemap(iovec_mut) =>
-                    Box::pin(self.leaf.read_spacemap(iovec_mut, lba)),
-            Cmd::ReadvAt(sglist_mut) => Box::pin(self.leaf.readv_at(sglist_mut, lba)),
+                    self.leaf.read_spacemap(iovec_mut, lba),
+            Cmd::ReadvAt(sglist_mut) => self.leaf.readv_at(sglist_mut, lba),
             Cmd::EraseZone(start) => self.leaf.erase_zone(start, lba),
             Cmd::FinishZone(start) => self.leaf.finish_zone(start),
             Cmd::OpenZone => self.leaf.open_zone(lba),
-            Cmd::WriteLabel(labeller) => Box::pin(self.leaf.write_label(labeller)),
+            Cmd::WriteLabel(labeller) => self.leaf.write_label(labeller),
             Cmd::WriteSpacemap(sglist) =>
-                Box::pin(self.leaf.write_spacemap(sglist, lba)),
+                self.leaf.write_spacemap(sglist, lba),
             Cmd::SyncAll => self.leaf.sync_all(),
         };
         (block_op.senders, fut)

@@ -128,6 +128,9 @@ mod ffi {
 use ffi::{diocgdelete, diocgattr, diocgattr_arg, diocgmediasize, diocgsectorsize, diocgstripesize};
 
 
+pub type VdevFileFut<'a> =
+    Pin<Box<dyn Future<Output=Result<()>> + Send + Sync + 'a>>;
+
 /// `VdevFile`: File-backed implementation of `VdevBlock`
 ///
 /// This is used by the FUSE implementation of BFFFS.  It works with both
@@ -165,13 +168,11 @@ impl<'fd> Vdev for VdevFile<'fd> {
         self.size
     }
 
-    fn sync_all<'a>(&'a self) -> Pin<Box<dyn futures::Future<Output = Result<()>> + Send + Sync + 'a>>
-    //fn sync_all<'a>(&'a self) ->  impl Future<Output = Result<()>> + Send + Sync + 'a
+    fn sync_all<'a>(&'a self) -> VdevFileFut<'a>
     {
         let fut = AioFileExt::sync_all(&self.fd).unwrap()
             .map_ok(drop)
             .map_err(Error::from);
-        //Box::pin(fut) as Pin<Box<dyn futures::Future<Output = Result<()>> + Send + Sync + 'fd>>
         Box::pin(fut)
     }
 
@@ -467,7 +468,7 @@ impl<'fd> VdevFile<'fd> {
     /// Asynchronously read a contiguous portion of the vdev.
     ///
     /// Return the number of bytes actually read.
-    pub fn read_at(&'fd self, mut buf: IoVecMut, lba: LbaT) -> ReadAt<'fd>
+    pub fn read_at(&'fd self, mut buf: IoVecMut, lba: LbaT) -> VdevFileFut<'fd>
     {
         // Unlike write_at, the upper layers will never read into a buffer that
         // isn't a multiple of a block size.  DDML::read ensures that.
@@ -481,7 +482,7 @@ impl<'fd> VdevFile<'fd> {
             mem::transmute::<&mut[u8], &'static mut [u8]>(buf.as_mut())
         };
         let fut = self.fd.read_at(&mut *bufaddr, off).unwrap();
-        ReadAt { _buf: buf, fut }
+        Box::pin(ReadAt { _buf: buf, fut })
     }
 
     /// Read one of the spacemaps from disk.
@@ -490,7 +491,8 @@ impl<'fd> VdevFile<'fd> {
     /// - `buf`:        Place the still-serialized spacemap here.  `buf` will be
     ///                 resized as needed.
     /// * `lba`     LBA to read from
-    pub fn read_spacemap(&'fd self, buf: IoVecMut, lba: LbaT) -> ReadAt<'fd>
+    pub fn read_spacemap(&'fd self, buf: IoVecMut, lba: LbaT)
+        -> VdevFileFut<'fd>
     {
         self.read_at(buf, lba)
     }
@@ -500,7 +502,8 @@ impl<'fd> VdevFile<'fd> {
     /// * `sglist   Scatter-gather list of buffers to receive data
     /// * `lba`     LBA to read from
     #[allow(clippy::transmute_ptr_to_ptr)]  // Clippy false positive
-    pub fn readv_at(&self, mut sglist: SGListMut, lba: LbaT) -> ReadvAt<'fd>
+    pub fn readv_at(&'fd self, mut sglist: SGListMut, lba: LbaT)
+        -> VdevFileFut<'fd>
     {
         for iovec in sglist.iter() {
             debug_assert_eq!(iovec.len() % BYTES_PER_LBA, 0);
@@ -526,25 +529,8 @@ impl<'fd> VdevFile<'fd> {
                 &mut slices
             )
         };
-        // Here we regrettably must unsafely remove the 'fd lifetime.  We only
-        // do it readv_at and not in other methods because in Rust mutable
-        // references are invariant over their type parameter, and only in
-        // readv_at is the argument a mutable reference to a reference.  Thus,
-        // the borrowing rules require that all of the argumnents to
-        // AioFileExt::readv_at have the exact same lifetime.  This
-        // transmutation is safe because we know that AioFileExt won't replace
-        // entire slices via this mutable reference; it will just mutate the
-        // slices we give it.
-        let fd: &BorrowedFd<'fd> = unsafe {
-            mem::transmute::<_, &BorrowedFd<'fd>>(&self.fd)
-        };
-        let fut = fd.readv_at(bufs, off).unwrap();
         let fut = self.fd.readv_at(bufs, off).unwrap();
-        ReadvAt {
-            _sglist: sglist,
-            _slices: slices,
-            fut
-        }
+        Box::pin(ReadvAt { _sglist: sglist, _slices: slices, fut })
     }
 
     fn reserved_space(&self) -> LbaT {
@@ -569,7 +555,7 @@ impl<'fd> VdevFile<'fd> {
     }
 
     /// Asynchronously write a contiguous portion of the vdev.
-    pub fn write_at(&'fd self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
+    pub fn write_at(&'fd self, buf: IoVec, lba: LbaT) -> VdevFileFut<'fd>
     {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
         debug_assert_eq!(buf.len() % BYTES_PER_LBA, 0);
@@ -580,7 +566,7 @@ impl<'fd> VdevFile<'fd> {
     // NB: functions like this don't submit to the kernel immediately with
     // aio_write.  They don't do that until polled.  So the return value's
     // lifetime must include both that of the BorrowedFd and self.
-    fn write_at_unchecked(&'fd self, buf: IoVec, lba: LbaT) -> WriteAt<'fd>
+    fn write_at_unchecked(&'fd self, buf: IoVec, lba: LbaT) -> VdevFileFut<'fd>
     {
         let off = lba * (BYTES_PER_LBA as u64);
         {
@@ -597,8 +583,7 @@ impl<'fd> VdevFile<'fd> {
 
         static_assertions::assert_impl_all!(&std::os::unix::io::OwnedFd: Send);
         static_assertions::assert_impl_all!(WriteAt: Send);
-        WriteAt { _buf:buf, fut }
-        //Box::pin(WriteAt { _buf: buf, fut })
+        Box::pin(WriteAt { _buf: buf, fut })
     }
 
     //fn write_at_unchecked2(&self, buf: IoVec, lba: LbaT) -> impl Future<Output = Result<()>> + Send + Sync
@@ -623,7 +608,7 @@ impl<'fd> VdevFile<'fd> {
     ///
     /// `label_writer` should already contain the serialized labels of every
     /// vdev stacked on top of this one.
-    pub fn write_label(&'fd self, label_writer: LabelWriter) -> WritevAt<'fd>
+    pub fn write_label(&'fd self, label_writer: LabelWriter) -> VdevFileFut<'fd>
     {
         let lba = label_writer.lba();
         let sglist = label_writer.into_sglist();
@@ -637,8 +622,7 @@ impl<'fd> VdevFile<'fd> {
     ///
     /// - `sglist`:     Buffers of data to write
     /// * `lba`     LBA to write to
-    pub fn write_spacemap(&'fd self, sglist: SGList, lba: LbaT)
-        -> WritevAt<'fd>
+    pub fn write_spacemap(&'fd self, sglist: SGList, lba: LbaT) -> VdevFileFut
     {
         let bytes: u64 = sglist.iter()
             .map(DivBuf::len)
@@ -653,14 +637,13 @@ impl<'fd> VdevFile<'fd> {
     ///
     /// * `sglist`  Scatter-gather list of buffers to write
     /// * `lba`     LBA to write to
-    pub fn writev_at(&'fd self, sglist: SGList, lba: LbaT) -> WritevAt<'fd>
+    pub fn writev_at(&'fd self, sglist: SGList, lba: LbaT) -> VdevFileFut<'fd>
     {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
         self.writev_at_unchecked(sglist, lba)
     }
 
-    fn writev_at_unchecked(&'fd self, sglist: SGList, lba: LbaT)
-        -> WritevAt<'fd>
+    fn writev_at_unchecked(&'fd self, sglist: SGList, lba: LbaT) -> VdevFileFut
     {
         let off = lba * (BYTES_PER_LBA as u64);
 
@@ -679,11 +662,11 @@ impl<'fd> VdevFile<'fd> {
                 .into_boxed_slice();
         let fut = self.fd.writev_at(&slices, off).unwrap();
 
-        WritevAt {
+        Box::pin(WritevAt {
             _sglist: sglist,
             _slices: slices,
             fut
-        }
+        })
     }
 }
 
