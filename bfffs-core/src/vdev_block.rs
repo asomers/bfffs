@@ -772,10 +772,13 @@ impl VdevBlock {
             .custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
             .open(&path)?;
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
-        let leaf = VdevLeaf::new(sref)?;
-        let lbas_per_zone = lbas_per_zone
-            .map(NonZeroU64::get)
-            .unwrap_or(leaf.lbas_per_zone());
+        let mut leaf = VdevLeaf::new(sref)?;
+        let lbas_per_zone = if let Some(lpz) = lbas_per_zone {
+            leaf.set(leaf.size(), lpz.get());
+            lpz.get()
+        } else {
+            leaf.lbas_per_zone()
+        };
         let size = leaf.size();
         let uuid = Uuid::new_v4();
         let spacemap_space = leaf.spacemap_space();
