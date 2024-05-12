@@ -462,7 +462,6 @@ impl<'fd> VdevFile<'fd> {
         assert!(lba >= self.reserved_space(), "Don't overwrite the labels!");
         debug_assert_eq!(buf.len() % BYTES_PER_LBA, 0);
         self.write_at_unchecked(buf, lba)
-        //Box::pin(self.write_at_unchecked(buf, lba))
     }
 
     // NB: functions like this don't submit to the kernel immediately with
