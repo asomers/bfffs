@@ -778,7 +778,7 @@ impl Filesystem for FuseFs {
         ino: u64,
         _fh: u64,
         soffset: i64,
-    ) -> fuse3::Result<ReplyDirectory<Self::DirEntryStream<'a>>> {
+    ) -> fuse3::Result<ReplyDirectory<Self::DirEntryStream<'_>>> {
         let fd = self
             .files
             .lock()
