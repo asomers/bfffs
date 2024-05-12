@@ -1224,9 +1224,6 @@ impl Manager {
         let path = p.as_ref().to_path_buf();
         let importable = ImportableLeaf{file, path};
         self.devices.insert(label.uuid, importable);
-        //let (vdev, lr) = VdevBlock::open(p)?;
-        //let importable = ImportableLeaf{vdev, path};
-        //self.devices.insert(vdev.uuid, importable);
         Ok(lr)
     }
 }
