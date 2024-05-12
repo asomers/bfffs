@@ -969,48 +969,6 @@ impl VdevBlock {
         }
     }
 
-    //async fn open<P: AsRef<Path>>(p: P) -> Result<(Self, LabelReader)> {
-        //let file = OpenOptions::new()
-            //.read(true)
-            //.write(true)
-            //.custom_flags(libc::O_DIRECT | libc::O_EXLOCK)
-            //.open(&p)?;
-        //let mut lr = Self::read_label(&file).await?;
-        //let label: Label = lr.deserialize().unwrap();
-        //let path = p.as_ref().to_path_buf();
-        //let lbas_per_zone = label.lbas_per_zone;
-        //let size = label.lbas;
-        //let uuid = label.uuid;
-        //assert!(leaf.size() >= label.lbas,
-            //"vdev has shrunk since creation");
-        //leaf.set(size, lbas_per_zone);
-        //let spacemap_space = leaf.spacemap_space();
-        //let inner = Arc::new(RwLock::new(Inner {
-            //delayed: None,
-            //optimum_queue_depth: leaf.optimum_queue_depth(),
-            //queue_depth: 0,
-            //last_lba: 0,
-            //remover: None,
-            //syncing: false,
-            //after_sync: VecDeque::new(),
-            //ahead: BinaryHeap::new(),
-            //behind: BinaryHeap::new(),
-            //weakself: Weak::new(),
-            //leaf,
-            //device: f
-        //}));
-        //inner.write().unwrap().weakself = Arc::downgrade(&inner);
-        //let vb = VdevBlock {
-            //inner,
-            //size,
-            //spacemap_space,
-            //lbas_per_zone,
-            //uuid,
-            //path
-        //};
-        //Ok((vb,lr))
-    //}
-
     /// The pathname most recently used to open this device.
     pub fn path(&self) -> &Path {
         &self.path
