@@ -840,15 +840,6 @@ impl VdevBlock {
         }
     }
 
-    /// Create a new VdevBlock from already-opened but unlabeled leaf
-    //fn from_leaf<P: AsRef<Path>>(path: P, leaf: VdevLeaf) -> Self {
-        //let uuid = Uuid::new_v4();
-        //let size = leaf.size();
-        //let lbas_per_zone = leaf.lbas_per_zone();
-        //let path = path.as_ref().to_owned();
-        //VdevBlock::new(leaf, path, uuid, size, lbas_per_zone)
-    //}
-
     /// Asynchronously erase a zone on a block device
     ///
     /// # Parameters
