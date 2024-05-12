@@ -4,8 +4,11 @@ use assert_cmd::prelude::*;
 use bfffs_core::{
     controller::Controller,
     database,
+    mirror,
     property::{Property, PropertyName, PropertySource},
+    Uuid,
     vdev::Vdev,
+    vdev_block,
     vdev_file::VdevFile,
 };
 use rstest::{fixture, rstest};
@@ -285,6 +288,11 @@ async fn zone_size(harness: Harness) {
         .success();
 
     // Check that we can actually open it.
-    let (vdev, _) = VdevFile::open(filenames[0].clone()).await.unwrap();
-    assert_eq!(2, vdev.zones());
+    let file = fs::File::open(filenames[0].clone()).unwrap();
+    let mut manager = vdev_block::Manager::default();
+    let mut lr = manager.taste(&filenames[0]).await.unwrap();
+    let ml: mirror::Label = lr.deserialize().unwrap();
+    let uuid: Uuid = ml.children[0];
+    let (vb, _) = manager.import(uuid).await.unwrap();
+    assert_eq!(2, vb.zones());
 }
