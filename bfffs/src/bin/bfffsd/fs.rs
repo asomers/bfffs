@@ -772,8 +772,8 @@ impl Filesystem for FuseFs {
         }
     }
 
-    async fn readdir<'a>(
-        &'a self,
+    async fn readdir(
+        &self,
         _req: Request,
         ino: u64,
         _fh: u64,
