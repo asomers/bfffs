@@ -1463,9 +1463,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.153"
+version = "0.2.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c198f91728a82281a64e1f4f9eeb25d82cb32a5de251c6bd1b5154d63a8e7bd"
+checksum = "ae743338b92ff9146ce83992f766a31066a91a8c84a45e0e9f21e7cf6de6d346"
 
 [[package]]
 name = "libloading"
@@ -1580,7 +1580,7 @@ dependencies = [
 [[package]]
 name = "mio-aio"
 version = "0.8.0"
-source = "git+https://github.com/asomers/mio-aio.git?rev=def63990b10#def63990b10203d3b63059e9a8858f78b61b26f9"
+source = "git+https://github.com/asomers/mio-aio.git?rev=4f3da6c#4f3da6cb1a5a50e92b8a227394272ceb1d0fdd50"
 dependencies = [
  "mio",
  "nix",
@@ -1635,13 +1635,12 @@ checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
 [[package]]
 name = "nix"
 version = "0.28.0"
-source = "git+https://github.com/asomers/nix.git?rev=6df57c72#6df57c72060d63baa1d817a252d41070274073d8"
+source = "git+https://github.com/nix-rust/nix.git?rev=e7acaff#e7acaff07f39ece39eae38a45c82810bfbbf58cd"
 dependencies = [
  "bitflags 2.4.0",
  "cfg-if",
  "cfg_aliases",
  "libc",
- "pin-init",
  "pin-utils",
 ]
 
@@ -1826,26 +1825,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6796ad771acdc0123d2a88dc428b5e38ef24456743ddb1744ed628f9815c096"
 dependencies = [
  "siphasher",
-]
-
-[[package]]
-name = "pin-init"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c7fdda986f792147b31c456ec52c713694d7d5e80ce497a93d1a2f79b5a4614"
-dependencies = [
- "pin-init-internal",
-]
-
-[[package]]
-name = "pin-init-internal"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a150a3ac84c78ea6522bd117ce123fc0258024bcf55c1be039d49a92f16f3158"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -2620,7 +2599,7 @@ dependencies = [
 [[package]]
 name = "tokio-file"
 version = "0.9.0"
-source = "git+https://github.com/asomers/tokio-file.git?rev=bc24a7438d3#bc24a7438d338ea534855d7e4a83b4087830c51f"
+source = "git+https://github.com/asomers/tokio-file.git?rev=0ef95e9#0ef95e9e61372c3c1e205111798fc97a83e3ee6a"
 dependencies = [
  "futures",
  "mio",
