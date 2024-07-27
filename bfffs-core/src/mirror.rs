@@ -553,6 +553,14 @@ impl Mirror {
         }
     }
 
+    /// Repair any degraded children by rewriting the given LBA range, if
+    /// necessary.
+    //pub fn repair_at(&self, lbas: Range<LbaT>)
+        //-> impl Future<Output=Result<()>> + Send + Sync
+    //{
+        //todo!()
+    //}
+
     /// Return a previously faulted device to service
     /// 
     /// # Returns
