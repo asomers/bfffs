@@ -572,11 +572,27 @@ impl Mirror {
 
     /// Repair any degraded children by rewriting the given LBA range, if
     /// necessary.
-    //pub fn repair_at(&self, lbas: Range<LbaT>)
-        //-> impl Future<Output=Result<()>> + Send + Sync
-    //{
-        //todo!()
-    //}
+    pub fn repair_at(&self, lbas: Range<LbaT>)
+        -> impl Future<Output=Result<()>> + Send + Sync
+    {
+        /* Outline:
+         * create 2 loops:
+         *   - First loop reads blocks from good disks
+         *   - First loop writes into a size-bounded queue
+         *   - Second loop reads from queue and writes to bad disks
+         */
+        /* These constants are unoptimized guesses */
+        const BLOCKSIZE_BYTES = 2**18;
+        const BLOCKSIZES_LBA = (BLOCKSIZE_BYTES / BYTES_PER_LBA) as LbaT;
+        const QDEPTH = 2;
+        let total_lbas = lbas.end - lbas.start;
+        let nblocks = total_lbas.div_ceil(BLOCKSIZE_LBAS);
+        let reader = stream::iter(0..nblocks).for_each(|i| {
+
+        });
+
+        todo!()
+    }
 
     /// Return a previously faulted device to service
     /// 
