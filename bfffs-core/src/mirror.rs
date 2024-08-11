@@ -11,6 +11,7 @@ use std::{
     mem,
     num::{NonZeroU8, NonZeroU64},
     path::Path,
+    ops::Range,
     pin::Pin,
     sync::{
         Arc,
@@ -27,7 +28,7 @@ use futures::{
     TryFutureExt,
     TryStreamExt,
     future,
-    stream::FuturesUnordered,
+    stream::{self, FuturesUnordered},
     task::{Context, Poll}
 };
 use pin_project::pin_project;
@@ -582,16 +583,32 @@ impl Mirror {
          *   - Second loop reads from queue and writes to bad disks
          */
         /* These constants are unoptimized guesses */
-        const BLOCKSIZE_BYTES = 2**18;
-        const BLOCKSIZES_LBA = (BLOCKSIZE_BYTES / BYTES_PER_LBA) as LbaT;
-        const QDEPTH = 2;
+        const BLOCKSIZE_BYTES: usize = 1 << 18;
+        const BLOCKSIZE_LBAS: LbaT = (BLOCKSIZE_BYTES / BYTES_PER_LBA) as LbaT;
+
+        //const QDEPTH = 2;
         let total_lbas = lbas.end - lbas.start;
         let nblocks = total_lbas.div_ceil(BLOCKSIZE_LBAS);
-        let reader = stream::iter(0..nblocks).for_each(|i| {
-
-        });
-
-        todo!()
+        stream::iter(0..nblocks)
+        .map(Ok)
+        .try_fold((), move |_acc: (), i: LbaT| async move {
+            // TODO: maybe truncate dbs at the end of the range
+            let dbs = DivBufShared::uninitialized(BLOCKSIZE_BYTES);
+            let dbm = dbs.try_mut().unwrap();
+            let lba = lbas.start + i * BLOCKSIZE_LBAS;
+            self.read_at(dbm, lba).await?;
+            let r: Result<()> = self.children.iter()
+                .filter_map(|child| match child {
+                    // TODO: check whether this child has LBA range of concern
+                    Child::Rebuilding(vb) => {
+                        Some(vb.write_at(dbs.try_const().unwrap(), lba))
+                    }
+                    _ => None,
+                }).collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>()
+            .map_ok(drop).await;
+            r
+        })
     }
 
     /// Return a previously faulted device to service
