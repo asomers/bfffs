@@ -186,6 +186,7 @@ impl Child {
         matches!(self, Child::Present(_))
     }
 
+    #[cfg(test)]
     fn is_rebuilding(&self) -> bool {
         matches!(self, Child::Rebuilding(_))
     }
