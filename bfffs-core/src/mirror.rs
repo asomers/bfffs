@@ -24,11 +24,13 @@ use divbuf::{DivBufInaccessible, DivBufMut, DivBufShared};
 use futures::{
     Future,
     FutureExt,
+    SinkExt,
     StreamExt,
     TryFutureExt,
     TryStreamExt,
     future,
-    stream::{self, FuturesUnordered},
+    channel::mpsc,
+    stream::FuturesUnordered,
     task::{Context, Poll}
 };
 use pin_project::pin_project;
@@ -573,8 +575,8 @@ impl Mirror {
 
     /// Repair any degraded children by rewriting the given LBA range, if
     /// necessary.
-    pub fn repair_at(&self, lbas: Range<LbaT>)
-        -> RepairAt
+    pub fn repair_at(&self, mut lbas: Range<LbaT>)
+        -> impl Future<Output=Result<()>> + Send + Sync
     {
         /* Outline:
          * create 2 loops:
@@ -585,47 +587,48 @@ impl Mirror {
         /* These constants are unoptimized guesses */
         const BLOCKSIZE_BYTES: usize = 1 << 18;
         const BLOCKSIZE_LBAS: LbaT = (BLOCKSIZE_BYTES / BYTES_PER_LBA) as LbaT;
+        const QDEPTH: usize = 1;
 
-        //const QDEPTH = 2;
-        let total_lbas = lbas.end - lbas.start;
-        let nblocks = total_lbas.div_ceil(BLOCKSIZE_LBAS);
-        let bufsize = BLOCKSIZE_LBAS.max(total_lbas) as usize * BYTES_PER_LBA;
-        let dbs = DivBufShared::uninitialized(bufsize);
-        let dbm = dbs.try_mut().unwrap();
-        let lba = lbas.start;
-        let (fut, read_children) =
-            self.read_something(move |c| c.read_at(dbm, lba));
+        let read_children = self.children.iter()
+            .filter_map(Child::as_present)
+            .cloned()
+            .collect::<Vec<_>>();
         let write_children = self.children.iter()
             .filter_map(|c| match c {
                 Child::Rebuilding(vb) => Some(vb.clone()),
                 _ => None
             }).collect::<Vec<_>>();
-        RepairAt {
-            read_children,
-            write_children,
-            lba,
-            lbas,
-            dbs,
-            fut,
-        }
-        //stream::iter(0..nblocks)
-        //.map(Ok)
-        //.try_fold((), move |_acc: (), i: LbaT| async move {
-            //// TODO: maybe truncate dbs at the end of the range
-            //let lba = lbas.start + i * BLOCKSIZE_LBAS;
-            //self.read_at(dbm, lba).await?;
-            //let r: Result<()> = self.children.iter()
-                //.filter_map(|child| match child {
-                    //// TODO: check whether this child has LBA range of concern
-                    //Child::Rebuilding(vb) => {
-                        //Some(vb.write_at(dbs.try_const().unwrap(), lba))
-                    //}
-                    //_ => None,
-                //}).collect::<FuturesUnordered<_>>()
-            //.try_collect::<Vec<_>>()
-            //.map_ok(drop).await;
-            //r
-        //})
+
+        let (mut tx, rx) = mpsc::channel(QDEPTH);
+        let mut idx = self.read_idx();
+        let mut wlba = lbas.start;
+        let reader = async move {
+            while lbas.start < lbas.end {
+                let bufsize = BLOCKSIZE_LBAS.max(lbas.end - lbas.start) as usize *
+                    BYTES_PER_LBA;
+                let dbs = DivBufShared::uninitialized(bufsize);
+                let dbm = dbs.try_mut().unwrap();
+                let child = idx % read_children.len();
+                idx += 1;
+                lbas.start += BLOCKSIZE_LBAS;
+                read_children[child].read_at(dbm, lbas.start).await?;
+                tx.feed(dbs).await.map_err(|_| Error::EPIPE)?;
+            }
+            Ok(())
+        };
+        let writer = rx.map(Ok)
+            .try_for_each_concurrent(Some(QDEPTH), move |dbs| {
+                let db = dbs.try_const().unwrap();
+                let fut = write_children.iter().map(|vb| {
+                    vb.write_at(db.clone(), wlba)
+                }).collect::<FuturesUnordered<_>>()
+                .try_collect::<Vec<_>>()
+                .map_ok(drop);
+                wlba += BLOCKSIZE_LBAS;
+                fut
+            });
+        future::try_join(reader, writer)
+            .map_ok(drop)
     }
 
     /// Return a previously faulted device to service
@@ -874,28 +877,6 @@ impl Future for ReadvAt {
             let new_fut = child.readv_at(bufs, *pinned.lba);
             pinned.fut.replace(new_fut);
         }
-    }
-}
-
-/// Future type of [`Mirror::repair_at`]
-#[pin_project]
-pub struct RepairAt {
-    read_children: Vec<Arc<VdevBlock>>,
-    write_children: Vec<Arc<VdevBlock>>,
-    dbs: DivBufShared,
-    /// The most recently read LBA
-    lba: LbaT,
-    /// Total range of the operation
-    lbas: Range<LbaT>,
-    #[pin]
-    fut: Option<VdevBlockFut>,
-}
-impl Future for RepairAt {
-    type Output = Result<()>;
-
-    fn poll<'a>(mut self: Pin<&mut Self>, cx: &mut Context<'a>) -> Poll<Self::Output>
-    {
-        todo!()
     }
 }
 
