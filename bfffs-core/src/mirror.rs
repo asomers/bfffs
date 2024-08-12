@@ -1780,6 +1780,20 @@ mod t {
         }
     }
 
+    mod repair_at {
+        use super::*;
+
+        // TODO:
+        // * No repairing children
+        // * Reparing children, but they don't need this TXG
+        // * One repairing child
+        // * Two repairing children
+        // * Error during write
+        // * Error during read
+        // * Range includes more than one blocksize
+        // * Range is not an integer multiple of blocksize
+    }
+
     mod restore {
         use super::*;
 
