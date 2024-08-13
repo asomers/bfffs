@@ -604,14 +604,14 @@ impl Mirror {
         let mut wlba = lbas.start;
         let reader = async move {
             while lbas.start < lbas.end {
-                let bufsize = BLOCKSIZE_LBAS.max(lbas.end - lbas.start) as usize *
+                let bufsize = BLOCKSIZE_LBAS.min(lbas.end - lbas.start) as usize *
                     BYTES_PER_LBA;
                 let dbs = DivBufShared::uninitialized(bufsize);
                 let dbm = dbs.try_mut().unwrap();
                 let child = idx % read_children.len();
+                read_children[child].read_at(dbm, lbas.start).await?;
                 idx += 1;
                 lbas.start += BLOCKSIZE_LBAS;
-                read_children[child].read_at(dbm, lbas.start).await?;
                 tx.feed(dbs).await.map_err(|_| Error::EPIPE)?;
             }
             Ok(())
@@ -1804,14 +1804,154 @@ mod t {
         use super::*;
 
         // TODO:
-        // * No repairing children
         // * Reparing children, but they don't need this TXG
-        // * One repairing child
-        // * Two repairing children
+        // * Two reparing children, but only one needs this TXG
         // * Error during write
         // * Error during read
-        // * Range includes more than one blocksize
-        // * Range is not an integer multiple of blocksize
+
+        /// When rebuilding a large range, it will be split into multiple
+        /// blocks.  The final one may be shortened.
+        #[tokio::test]
+        async fn multiple_blocks() {
+            const ZL1: (LbaT, LbaT) = (32, 192);
+            let mut bd0 = mock_vdev_block();
+            let mut bd1 = mock_vdev_block();
+            bd0.expect_zone_limits()
+                .with(eq(1))
+                .return_const(ZL1);
+            bd1.expect_zone_limits()
+                .with(eq(1))
+                .return_const(ZL1);
+            bd0.expect_read_at()
+                .never();
+            bd0.expect_write_at()
+                .once()
+                .withf(|buf, lba|
+                    buf.len() == 1 << 18
+                    && *lba == 32
+                ).return_once(|_, _| Box::pin(future::ok::<(), Error>(())));
+            bd0.expect_write_at()
+                .once()
+                .withf(|buf, lba|
+                    buf.len() == 1 << 18
+                    && *lba == 96
+                ).return_once(|_, _| Box::pin(future::ok::<(), Error>(())));
+            bd0.expect_write_at()
+                .once()
+                .withf(|buf, lba|
+                    buf.len() == 1 << 17
+                    && *lba == 160
+                ).return_once(|_, _| Box::pin(future::ok::<(), Error>(())));
+            bd1.expect_read_at()
+                .times(1)
+                .withf(|buf, lba|
+                       buf.len() == 1 << 18
+                       && *lba == 32
+                ).returning(move |_, _| Box::pin(future::ok(())));
+            bd1.expect_read_at()
+                .times(1)
+                .withf(|buf, lba|
+                       buf.len() == 1 << 18
+                       && *lba == 96
+                ).returning(move |_, _| Box::pin(future::ok(())));
+            bd1.expect_read_at()
+                .times(1)
+                .withf(|buf, lba|
+                       buf.len() == 1 << 17
+                       && *lba == 160
+                ).returning(move |_, _| Box::pin(future::ok(())));
+            let children = vec![
+                Child::rebuilding(bd0),
+                Child::present(bd1)
+            ];
+            let mirror = Mirror::new(Uuid::new_v4(), children);
+            let (start, end) = mirror.zone_limits(1);
+            mirror.repair_at(start..end).await.unwrap();
+        }
+
+        /// If no children need to be repaired, then no reads are necessary.
+        #[tokio::test]
+        async fn no_rebuilding_children() {
+            let mut bd0 = mock_vdev_block();
+            bd0.expect_read_at()
+                .never();
+            let faulty_uuid = Uuid::new_v4();
+            let children = vec![
+                Child::present(bd0),
+                Child::missing(faulty_uuid)
+            ];
+            let mirror = Mirror::new(Uuid::new_v4(), children);
+            let (start, end) = mirror.zone_limits(0);
+            mirror.repair_at(start..end).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn one_rebuilding_child() {
+            let mut bd0 = mock_vdev_block();
+            let mut bd1 = mock_vdev_block();
+            bd0.expect_read_at()
+                .never();
+            bd0.expect_write_at()
+                .once()
+                .withf(|buf, lba|
+                    buf.len() == 29 << 12
+                    && *lba == 3
+                ).return_once(|_, _| Box::pin(future::ok::<(), Error>(())));
+            bd1.expect_read_at()
+                .times(1)
+                .withf(|buf, lba|
+                       buf.len() == 29 << 12
+                       && *lba == 3
+                ).returning(move |_, _| {
+                    Box::pin(future::ok(()))
+                });
+            let children = vec![
+                Child::rebuilding(bd0),
+                Child::present(bd1)
+            ];
+            let mirror = Mirror::new(Uuid::new_v4(), children);
+            let (start, end) = mirror.zone_limits(0);
+            mirror.repair_at(start..end).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn two_rebuilding_children() {
+            let mut bd0 = mock_vdev_block();
+            let mut bd1 = mock_vdev_block();
+            let mut bd2 = mock_vdev_block();
+            bd0.expect_read_at()
+                .never();
+            bd2.expect_read_at()
+                .never();
+            bd0.expect_write_at()
+                .once()
+                .withf(|buf, lba|
+                    buf.len() == 29 << 12
+                    && *lba == 3
+                ).return_once(|_, _| Box::pin(future::ok::<(), Error>(())));
+            bd2.expect_write_at()
+                .once()
+                .withf(|buf, lba|
+                    buf.len() == 29 << 12
+                    && *lba == 3
+                ).return_once(|_, _| Box::pin(future::ok::<(), Error>(())));
+            bd1.expect_read_at()
+                .times(1)
+                .withf(|buf, lba|
+                       buf.len() == 29 << 12
+                       && *lba == 3
+                ).returning(move |_, _| {
+                    Box::pin(future::ok(()))
+                });
+            let children = vec![
+                Child::rebuilding(bd0),
+                Child::present(bd1),
+                Child::rebuilding(bd2),
+            ];
+            let mirror = Mirror::new(Uuid::new_v4(), children);
+            let (start, end) = mirror.zone_limits(0);
+            mirror.repair_at(start..end).await.unwrap();
+        }
     }
 
     mod restore {
