@@ -8,20 +8,27 @@ author: Alan Somers <asomers@gmail.com>
 Layers
 ------
 
-TODO
+BFFFS is organized into multiple layers, each (to the extent possible) ignorant of layers beyond its immediate neighbors.  The software stack, somewhat simplified, looks like the below:
+
 ```mermaid
 block
-  columns 3
-  a:3
+  columns 2
+  Bfffsd:2
+  Controller:1 FuseFs:1
+  Fs:2
+  Database:2
+  Dataset:2
+  IDML:2
+  DTree:2
+  DDML:2
+  pool:2
+  cluster:2
   block:group1:2
-    columns 2
-    h i j k
+    null_raid vdev_raid
   end
-  g
-  block:group2:3
-    %% columns auto (default)
-    l m n o p q r
-end
+  mirror:2
+  vdev_block:2
+  vdev_file:2
 ```
 
 Testing strategy
