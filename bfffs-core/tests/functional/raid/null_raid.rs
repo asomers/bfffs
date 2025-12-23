@@ -95,10 +95,10 @@ mod persistence {
 
     use pretty_assertions::assert_eq;
 
-    const GOLDEN_VDEV_NULLRAID_LABEL: [u8; 36] = [
+    const GOLDEN_VDEV_NULLRAID_LABEL: [u8; 34] = [
         // Past the mirror::Label, we have a raid::Label
         // First comes the NullRaid discriminant
-        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
         // Then the NullRaid label, beginning with a UUID
                                 0x2f, 0x27, 0x51, 0xe5,
         0xe8, 0x58, 0x45, 0x1b, 0x92, 0xb5, 0x24, 0x0f,
@@ -114,6 +114,7 @@ mod persistence {
     #[tokio::test]
     async fn open_after_write(#[case] h: Harness) {
         let uuid = h.vdev.uuid();
+        dbg!(&uuid);
         let label_writer = LabelWriter::new(0);
         h.vdev.write_label(label_writer).await.unwrap();
         drop(h.vdev);

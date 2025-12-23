@@ -34,6 +34,7 @@ libc = { workspace = true }
 lz4_flex = { workspace = true }
 metrohash = { workspace = true }
 mockall_double = { workspace = true }
+nanoserde = { workspace = true }
 nix = { workspace = true, features = ["feature", "fs", "ioctl", "mount", "time"] }
 num_enum = { workspace = true }
 num-traits = { workspace = true }

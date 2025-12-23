@@ -381,7 +381,7 @@ impl PrimeSIter {
 
     /// Create a new iterator.  `id` is the id of the first chunk that the
     /// iterator should return.
-    fn new(layout: &PrimeS, start: ChunkId, end: ChunkId) -> Self {
+    pub fn new(layout: &PrimeS, start: ChunkId, end: ChunkId) -> Self {
         let cli = layout.id2loc_int(&start);
         let s_z = cli.s.rem_euclid(i16::from(layout.stripes_per_iteration()));
         let b = PrimeS::offset_within_stripe(start, cli.a, cli.s, layout.m);

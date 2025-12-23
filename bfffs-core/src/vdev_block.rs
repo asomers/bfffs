@@ -1129,7 +1129,7 @@ impl Vdev for VdevBlock {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, nanoserde::DeBin, nanoserde::SerBin)]
 pub struct Label {
     /// Vdev UUID, fixed at format time
     uuid:           Uuid,
@@ -1162,7 +1162,7 @@ impl Manager {
         future::ready(self.devices.remove(&uuid).ok_or(Error::ENOENT))
             .and_then(move |rec| async move {
                 let mut lr = Self::read_label(&rec.file).await?;
-                let label: Label = lr.deserialize().unwrap();
+                let label: Label = lr.deserialize_ns().unwrap();
                 assert_eq!(uuid, label.uuid);
                 let vb = VdevBlock::new(rec.file, rec.path, uuid,
                     label.lbas, label.lbas_per_zone);

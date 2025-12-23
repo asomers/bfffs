@@ -54,7 +54,7 @@ mod tests;
 ///
 /// This algorithm maps RAID chunks to specific disks and offsets.  It does not
 /// encode or decode parity.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, nanoserde::DeBin, Deserialize)]
 pub enum LayoutAlgorithm {
     /// A good declustered algorithm for any prime number of disks
     PrimeS,
@@ -387,7 +387,7 @@ impl Child {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, nanoserde::DeBin, Deserialize, Debug)]
 pub struct Label {
     /// Vdev UUID, fixed at format time
     pub uuid:           Uuid,

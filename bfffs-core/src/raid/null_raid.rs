@@ -24,7 +24,7 @@ use super::{
 #[double]
 use crate::mirror::Mirror;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, nanoserde::DeBin, Deserialize, Debug)]
 pub struct Label {
     /// Vdev UUID, fixed at format time
     pub uuid:   Uuid,

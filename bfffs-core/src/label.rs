@@ -7,6 +7,7 @@ use crate::{
 };
 use divbuf::{DivBuf, DivBufShared};
 use metrohash::MetroHash64;
+use nanoserde::{DeBin, DeBinErr};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{hash::{Hash, Hasher}, io::{self, Seek, SeekFrom}};
 
@@ -60,7 +61,27 @@ impl LabelReader {
     pub fn deserialize<T>(&mut self) -> bincode::Result<T>
         where T: DeserializeOwned
     {
+        let offset = self.cursor.position() as usize;
+        {
+            let v = self.cursor.get_ref();
+            dbg!(std::mem::size_of::<T>(), &v[offset..(offset+16)]);
+        }
         bincode::deserialize_from(&mut self.cursor)
+    }
+
+    // TODO: rename to "deserialize" after deleting the bincode method
+    pub fn deserialize_ns<T: DeBin>(&mut self)
+        -> std::result::Result<T, DeBinErr>
+    {
+        //todo!()
+        let mut offset = self.cursor.position() as usize;
+        {
+            let v = self.cursor.get_ref();
+            dbg!(std::mem::size_of::<T>(), &v[offset..(offset+std::mem::size_of::<T>())]);
+        }
+        let t = T::de_bin(&mut offset, self.cursor.get_ref())?;
+        self.cursor.set_position(offset as u64);
+        Ok(t)
     }
 
     /// Construct a `LabelReader` using the raw buffer read from disk

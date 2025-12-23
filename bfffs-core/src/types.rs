@@ -3,6 +3,7 @@
 
 use divbuf::{DivBuf, DivBufMut};
 use enum_primitive_derive::Primitive;
+use nanoserde::{DeBin, DeBinErr};
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde_derive::{Deserialize, Serialize};
 use serde::{
@@ -401,6 +402,31 @@ impl FromStr for Uuid {
     }
 }
 
+impl DeBin for Uuid {
+    fn de_bin(offset: &mut usize, bytes: &[u8])
+        -> std::result::Result<Self, DeBinErr>
+    {
+        let need = std::mem::size_of::<uuid::Uuid>();
+        let have = bytes.len().saturating_sub(*offset);
+        if have >= need {
+            let uuid = uuid::Uuid::from_slice(&bytes[*offset..(*offset + 16)])
+                .unwrap();
+            *offset += need;
+            Ok(Self(uuid))
+        } else {
+            Err(DeBinErr::new(*offset, need, have))
+        }
+    }
+}
+
+impl nanoserde::SerBin for Uuid {
+    fn ser_bin(&self, output: &mut Vec<u8>) {
+        let bytes = self.0.as_bytes();
+        debug_assert_eq!(bytes.len(), 16);
+        bytes.ser_bin(output)
+    }
+}
+
 impl<'de> Deserialize<'de> for Uuid {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
         where D: Deserializer<'de>
@@ -466,5 +492,51 @@ fn rid_typical_size() {
                bincode::serialized_size(&RID::default()).unwrap() as usize);
 }
 
+mod uuid {
+    use super::*;
+    use nanoserde::SerBin;
+    use pretty_assertions::assert_eq;
+
+    const BIN: [u8; 18] = [0xFF,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0xFF];
+    const STR: &str = "00010203-0405-0607-0809-0a0b0c0d0e0f";
+
+    mod de_bin {
+        use super::*;
+        use pretty_assertions::assert_eq;
+
+        #[test]
+        fn negative_space() {
+            let mut offset = BIN.len() + 1;
+            Uuid::de_bin(&mut offset, &BIN).unwrap_err();
+        }
+
+        #[test]
+        fn ok() {
+            let mut offset = 1;
+            let uuid = Uuid::de_bin(&mut offset, &BIN).unwrap();
+            let want = Uuid::parse_str(STR).unwrap();
+            assert_eq!(uuid, want);
+            assert_eq!(offset, 17);
+        }
+
+        #[test]
+        fn too_short() {
+            let mut offset = 3;
+            Uuid::de_bin(&mut offset, &BIN).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn ser_bin() {
+        let uuid = Uuid::parse_str(STR).unwrap();
+        let mut buf = vec![0xffu8];
+        uuid.ser_bin(&mut buf);
+        assert_eq!(buf.len(), 17);
+        assert_eq!(&buf[..], &BIN[0..17]);
+    }
+}
 }
 // LCOV_EXCL_STOP

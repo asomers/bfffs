@@ -49,7 +49,7 @@ pub use self::null_raid::NullRaid;
 pub use self::vdev_raid::VdevRaid;
 pub use self::vdev_raid_api::VdevRaidApi;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, nanoserde::DeBin, Deserialize, Debug)]
 pub enum Label {
     NullRaid(self::null_raid::Label),
     Raid(self::vdev_raid::Label),
@@ -79,10 +79,55 @@ impl Label {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DummyRaid();
+impl Locator for DummyRaid {
+    fn datachunks(&self) -> u64 {
+        todo!()
+    }
+
+    fn depth(&self) -> u32 {
+        todo!()
+    }
+
+    fn id2loc(&self, _: ChunkId) -> Chunkloc {
+        todo!()
+    }
+
+    fn iter(&self, _: ChunkId, _: ChunkId)
+        -> impl Iterator<Item=(ChunkId, Chunkloc)>
+    {
+        let ps = crate::raid::prime_s::PrimeS::new(1, 1, 0);
+        crate::raid::prime_s::PrimeSIter::new(&ps, ChunkId::Data(0), ChunkId::Data(0))
+    }
+
+    fn loc2id(&self, _: Chunkloc) -> ChunkId {
+        todo!()
+    }
+
+    fn parallel_read_count(&self, _: usize) -> usize {
+        todo!()
+    }
+
+    fn protection(&self) -> i16 {
+        todo!()
+    }
+
+    #[cfg(test)]
+    fn stripes(&self) -> u32 {
+        todo!()
+    }
+
+    fn stripesize(&self) -> i16 {
+        todo!()
+    }
+}
+
 #[derive(Clone)]
 #[enum_dispatch::enum_dispatch]
 enum LocatorImpl {
-    PrimeS(prime_s::PrimeS)
+    PrimeS(prime_s::PrimeS),
+    //Dummy(DummyRaid)
 }
 
 /// Manage BFFFS-formatted disks that aren't yet part of an imported pool.
@@ -135,7 +180,9 @@ impl Manager {
     /// for building Pools.
     pub async fn taste<P: AsRef<Path>>(&mut self, p: P) -> Result<LabelReader> {
         let mut reader = self.mm.taste(p).await?;
-        let rl: Label = reader.deserialize().unwrap();
+        let rl: Label = reader.deserialize_ns().unwrap();
+        dbg!(&rl);
+        //let rl: Label = reader.deserialize().unwrap();
         self.raids.insert(rl.uuid(), rl);
         Ok(reader)
     }
@@ -247,4 +294,42 @@ mock!{
         fn write_spacemap(&self, sglist: SGList, idx: u32, block: LbaT)
             -> BoxVdevFut;
     }
+}
+
+// LCOV_EXCL_START
+#[cfg(test)]
+mod t {
+use pretty_assertions::assert_eq;
+use super::*;
+use nanoserde::SerBin;
+
+#[test]
+fn bincode_vs_nanoserde_enum_1() {
+    #[derive(Copy, Debug, Eq, Clone, PartialEq, nanoserde::SerBin, Serialize, Deserialize)]
+    enum MiniLabel {
+        V(u8)
+    }
+    let ml = MiniLabel::V(42);
+    let mut ns_buf = Vec::new();
+    let bc_buf = bincode::serialize(&ml).unwrap();
+    ml.ser_bin(&mut ns_buf);
+    assert_eq!(ns_buf, bc_buf);
+
+}
+
+#[test]
+fn bincode_vs_nanoserde_enum_2() {
+    #[derive(Copy, Debug, Eq, Clone, PartialEq, nanoserde::SerBin, Serialize, Deserialize)]
+    enum MiniLabel {
+        V(u8),
+        W(u8)
+    }
+    let ml = MiniLabel::W(42);
+    let mut ns_buf = Vec::new();
+    let bc_buf = bincode::serialize(&ml).unwrap();
+    ml.ser_bin(&mut ns_buf);
+    assert_eq!(ns_buf, bc_buf);
+
+}
+
 }
