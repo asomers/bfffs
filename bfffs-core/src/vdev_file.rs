@@ -272,7 +272,16 @@ impl<'fd> VdevFile<'fd> {
                 .map_err(Error::from);
                 Box::pin(t)
             },
-            _ => todo!()
+            EraseMethod::ResetWritePointer => {
+                // This works because we require zoned devices to have equally
+                // sized zones.
+                let fd = self.fd.as_raw_fd();
+                let t = task::spawn_blocking(move || {
+                    fd.reset_write_pointer(start, false)
+                }).map(std::result::Result::unwrap)
+                .map_err(Error::from);
+                Box::pin(t)
+            }
         }
     }
 

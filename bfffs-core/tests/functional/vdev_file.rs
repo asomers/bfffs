@@ -340,7 +340,13 @@ mod zoned {
         vdev::Vdev,
         vdev_file::*
     };
-    use freebsd_zonecmd::gzoned::{self, Gzoned};
+    use divbuf::DivBufShared;
+    use freebsd_zonecmd::{
+        ReportOptions,
+        ZonedDevice,
+        ZoneType,
+        gzoned::{self, Gzoned}
+    };
     use function_name::named;
     use pretty_assertions::assert_eq;
     use std::{
@@ -351,7 +357,7 @@ mod zoned {
 
     struct Harness {
         vdev: VdevFile<'static>,
-        _fd: fs::File,
+        fd: fs::File,
         _zonedev: Gzoned,
     }
 
@@ -372,7 +378,7 @@ mod zoned {
         let vdev = VdevFile::new(&fd)?;
         // Safe because vdev will drop before fd
         let vdev = unsafe{ mem::transmute::<VdevFile, VdevFile<'static>>(vdev)};
-        Ok(Harness{vdev, _fd: fd, _zonedev: zonedev})
+        Ok(Harness{vdev, fd, _zonedev: zonedev})
     }
 
     // TODO:
@@ -384,6 +390,45 @@ mod zoned {
     // [ ] Fail to create a vdev_file if the spacemap cannot fit within the
     //     sequential zones.
     // [ ] The set method should be unable to change zone count
+
+    /// erase_zone should use RWP on such devices
+    #[named]
+    #[tokio::test]
+    async fn erase_zone() {
+        require_gzoned!();
+
+        let h = harness().unwrap();
+
+        let zid = 2;
+        let zl2 = h.vdev.zone_limits(zid);
+
+        // First, write a record
+        {
+            let dbs = DivBufShared::from(vec![42u8; 4096]);
+            let wbuf = dbs.try_const().unwrap();
+            h.vdev.write_at(wbuf.clone(), zl2.0).await.unwrap();
+        }
+
+        {
+            let mut rz = h.fd.report_zones(ReportOptions::All, zl2.0)
+                .unwrap();
+            let first = rz.next().unwrap().unwrap();
+            assert_eq!(first.zone_type, ZoneType::SeqRequired,
+                       "This test requires a sequential zone");
+        }
+
+        // Actually erase the zone
+        h.vdev.erase_zone(zl2.0, zl2.1 - 1).await.unwrap();
+
+        // verify that it got erased.  The old data may or may not be readable,
+        // depending on the zoned device's implementaiton.
+        {
+            let mut rz = h.fd.report_zones(ReportOptions::All, zl2.0)
+                .unwrap();
+            let first = rz.next().unwrap().unwrap();
+            assert_eq!(first.write_pointer_lba, Some(zl2.0));
+        }
+    }
 
     #[named]
     #[tokio::test]
