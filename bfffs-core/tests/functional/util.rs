@@ -32,6 +32,25 @@ macro_rules! require_root {
 }
 
 #[macro_export]
+macro_rules! require_gzoned {
+    () => {
+        $crate::require_root!();
+
+        let exists = ::std::fs::exists("/sbin/gzoned");
+        if exists.is_err() || ! exists.unwrap() {
+            use ::std::io::Write;
+
+            let stderr = ::std::io::stderr();
+            let mut handle = stderr.lock();
+            writeln!(handle, "{} requires /sbin/gzoned.  Skipping test.",
+                concat!(::std::module_path!(), "::", function_name!()))
+                .unwrap();
+            return;
+        }
+    }
+}
+
+#[macro_export]
 macro_rules! assert_bufeq {
     ($left:expr, $right:expr) => {
         if $left != $right {

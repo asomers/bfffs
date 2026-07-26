@@ -332,3 +332,99 @@ mod dev {
         }
     }
 }
+
+/// Tests that use a simulated SMR device
+mod zoned {
+    use crate::require_gzoned;
+    use bfffs_core::{
+        vdev::Vdev,
+        vdev_file::*
+    };
+    use freebsd_zonecmd::gzoned::{self, Gzoned};
+    use function_name::named;
+    use pretty_assertions::assert_eq;
+    use std::{
+        fs,
+        io,
+        mem,
+    };
+
+    struct Harness {
+        vdev: VdevFile<'static>,
+        _fd: fs::File,
+        _zonedev: Gzoned,
+    }
+
+    fn harness() -> io::Result<Harness> {
+        let zonedev = gzoned::Builder::default()
+            .zonesize(4096)         // 16 MB zones
+            .sectors(4096 * 4)
+            .conventional_zones(0..=1)
+            .build()
+            .unwrap();
+        let fd = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(zonedev.path())
+            .unwrap();
+        let vdev = VdevFile::new(&fd)?;
+        // Safe because vdev will drop before fd
+        let vdev = unsafe{ mem::transmute::<VdevFile, VdevFile<'static>>(vdev)};
+        Ok(Harness{vdev, _fd: fd, _zonedev: zonedev})
+    }
+
+    // TODO:
+    // [ ] Fail to open an existing zoned device, if its zone size is different
+    //     than how it was originally formatted.
+    // [ ] erase_zone should use RWP in sequential zones
+    // [ ] erase_zone should be a NOP in conventional zones
+    // [ ] vdev_file will call finish_zone when the zone fills up
+    // [ ] Fail to create a vdev_file if the spacemap cannot fit within the
+    //     sequential zones.
+    // [ ] The set method should be unable to change zone count
+
+    #[named]
+    #[tokio::test]
+    async fn lba2zone() {
+        require_gzoned!();
+        let h = harness().unwrap();
+
+        assert_eq!(h.vdev.lba2zone(0), None);
+        assert_eq!(h.vdev.lba2zone(9), None);
+        assert_eq!(h.vdev.lba2zone(10), Some(0));
+        assert_eq!(h.vdev.lba2zone((1 << 12) - 1), Some(0));
+        assert_eq!(h.vdev.lba2zone(1 << 12), Some(1));
+    }
+
+    #[named]
+    #[tokio::test]
+    async fn size() {
+        require_gzoned!();
+        let h = harness().unwrap();
+
+        assert_eq!(h.vdev.size(), 12_288);
+    }
+
+    #[named]
+    #[tokio::test]
+    async fn zone_limits() {
+        require_gzoned!();
+        let h = harness().unwrap();
+
+        assert_eq!(h.vdev.zone_limits(0), (10, 1 << 12));
+        assert_eq!(h.vdev.zone_limits(1), (1 << 12, 2 << 12));
+        assert_eq!(h.vdev.zone_limits(2), (2 << 12, 3 << 12));
+        assert_eq!(h.vdev.zone_limits(3), (3 << 12, 4 << 12));
+    }
+
+    #[named]
+    #[tokio::test]
+    async fn zones() {
+        require_gzoned!();
+        let h = harness().unwrap();
+
+        assert_eq!(h.vdev.zones(), 3);
+    }
+}

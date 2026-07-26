@@ -28,6 +28,7 @@ downcast = "0.11.0"
 enum-primitive-derive = "0.3.0"
 fixedbitset = { version = "0.4.0", default-features = false }
 freebsd-libgeom = "0.2.2"
+freebsd-zonecmd = "0.1.0"
 function_name = "0.3.0"
 fuse3 = { version = "0.9.0", default-features = false }
 futures = "0.3.31"
@@ -84,3 +85,4 @@ zstd = "0.13.0"
 
 [patch.crates-io]
 atomic_enum = { git = "https://github.com/brain0/atomic_enum.git", rev = "baea45a" }
+freebsd-zonecmd = { path = "../freebsd-zonecmd" }

@@ -8,6 +8,7 @@ use crate::{
 };
 use atomic_enum::atomic_enum;
 use divbuf::DivBuf;
+use freebsd_zonecmd::{ReportOptions, ZonedDevice, ZoneSame, ZoneType};
 use futures::{
     Future,
     FutureExt,
@@ -45,6 +46,7 @@ enum EraseMethod {
     Fspacectl,
     #[cfg(have_fspacectl)]
     MaybeFspacectl,
+    ResetWritePointer,
 }
 
 impl AtomicEraseMethod {
@@ -269,7 +271,8 @@ impl<'fd> VdevFile<'fd> {
                 }).map(std::result::Result::unwrap)
                 .map_err(Error::from);
                 Box::pin(t)
-            }
+            },
+            _ => todo!()
         }
     }
 
@@ -314,6 +317,7 @@ impl<'fd> VdevFile<'fd> {
     {
         let md = f.metadata()?;
         let ft = md.file_type();
+
         // The preferred (not necessarily minimum) sector size for accessing
         // the device
         let sectorsize = if ft.is_block_device() || ft.is_char_device() {
@@ -321,7 +325,6 @@ impl<'fd> VdevFile<'fd> {
             let mut stripesize = mem::MaybeUninit::<nix::libc::off_t>::uninit();
             let fd = f.as_raw_fd();
             unsafe {
-                // TODO: use stripesize if it's greater than sector size
                 diocgsectorsize(fd, sectorsize.as_mut_ptr())?;
                 diocgstripesize(fd, stripesize.as_mut_ptr())?;
                 if stripesize.assume_init() > 0 {
@@ -333,9 +336,50 @@ impl<'fd> VdevFile<'fd> {
         } else {
             1
         };
-        let erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
+
         let size = Self::devlen(f, sectorsize)? / BYTES_PER_LBA as u64;
-        let lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
+        let lbas_per_zone;
+        let erase_method;
+
+        if let Ok(params) = f.get_params() {
+            if !params.supports_report_zones() {
+                tracing::info!("Zoned device does not support DISK_ZONE_REPORT_ZONES.");
+                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
+            if !params.supports_finish() {
+                tracing::info!("Zoned device does not support DISK_ZONE_FINISH.");
+                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
+            if !params.supports_reset_write_pointer() {
+                tracing::info!("Zoned device does not support DISK_ZONE_RWP.");
+                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
+            let mut rz = f.report_zones(ReportOptions::All, 0)?;
+            match rz.header().same {
+                ZoneSame::AllDifferent => {
+                    tracing::info!("Zoned device has differently-sized zones.");
+                    return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+                },
+                ZoneSame::Unknown(x) => {
+                    tracing::info!("Zoned device has unknown zone same value: {x}");
+                    return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+                },
+                _ => ()
+            };
+            let first_zone = rz.next().ok_or(io::Error::from_raw_os_error(libc::EOPNOTSUPP)).flatten()?;
+            if first_zone.zone_type != ZoneType::Conventional {
+                tracing::info!("Zoned device has non-conventional first zone");
+                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
+            lbas_per_zone = first_zone.zone_length;
+
+            erase_method = AtomicEraseMethod::new(EraseMethod::ResetWritePointer);
+        } else {
+            // Not a zoned device
+            erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
+            lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
+        }
+
         let nzones = size.div_ceil(lbas_per_zone);
         let spacemap_space = spacemap_space(nzones);
         Ok(VdevFile {

@@ -28,6 +28,7 @@ futures-locks = { workspace = true }
 itertools = { workspace = true }
 hexdump = { workspace = true }
 bfffs-isa-l = { path = "../bfffs-isa-l" }
+freebsd-zonecmd = { workspace = true }
 libc = { workspace = true }
 lz4_flex = { workspace = true }
 metrohash = { workspace = true }
@@ -54,6 +55,7 @@ zstd = { workspace = true }
 clap = { workspace = true, features = ["derive", "wrap_help"] }
 dashmap = { workspace = true }
 criterion = { workspace = true }
+freebsd-zonecmd = { workspace = true, features = ["gzoned"] }
 function_name = { workspace = true }
 futures-test = { workspace = true }
 glob = { workspace = true }
