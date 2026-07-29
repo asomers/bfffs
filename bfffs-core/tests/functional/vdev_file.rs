@@ -295,7 +295,7 @@ mod dev {
             .open(md.path())
             .unwrap();
         let mut vdev = VdevFile::new(&file)?;
-        vdev.set(vdev.size(), zones_per_lba);
+        vdev.set(vdev.size(), zones_per_lba).unwrap();
         // Safe because vdev will drop before _file
         let vdev = unsafe{ mem::transmute::<VdevFile, VdevFile<'static>>(vdev)};
         Ok(Harness{vdev, file, _md: md})
@@ -351,7 +351,7 @@ mod zoned {
     use pretty_assertions::assert_eq;
     use std::{
         fs,
-        io,
+        io::{self, ErrorKind},
         mem,
     };
 
@@ -384,12 +384,12 @@ mod zoned {
     // TODO:
     // [ ] Fail to open an existing zoned device, if its zone size is different
     //     than how it was originally formatted.
-    // [ ] erase_zone should use RWP in sequential zones
+    // [✓] erase_zone should use RWP in sequential zones
     // [ ] erase_zone should be a NOP in conventional zones
     // [ ] vdev_file will call finish_zone when the zone fills up
     // [ ] Fail to create a vdev_file if the spacemap cannot fit within the
     //     sequential zones.
-    // [ ] The set method should be unable to change zone count
+    // [✓] The set method should be unable to change zone count
 
     /// erase_zone should use RWP on such devices
     #[named]
@@ -471,5 +471,15 @@ mod zoned {
         let h = harness().unwrap();
 
         assert_eq!(h.vdev.zones(), 3);
+    }
+
+    #[named]
+    #[tokio::test]
+    async fn zone_size_is_fixed() {
+        require_gzoned!();
+        let mut h = harness().unwrap();
+
+        let e = h.vdev.set(h.vdev.size(), 1<<18).unwrap_err();
+        assert_eq!(ErrorKind::Unsupported, e.kind());
     }
 }

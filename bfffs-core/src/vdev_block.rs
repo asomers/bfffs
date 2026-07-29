@@ -786,7 +786,7 @@ impl VdevBlock {
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
         let mut leaf = VdevLeaf::new(sref)?;
         let lbas_per_zone = if let Some(lpz) = lbas_per_zone {
-            leaf.set(leaf.size(), lpz.get());
+            leaf.set(leaf.size(), lpz.get())?;
             lpz.get()
         } else {
             leaf.lbas_per_zone()
@@ -961,13 +961,13 @@ impl VdevBlock {
         size: LbaT,
         lbas_per_zone: LbaT,
         txg: TxgT
-    ) -> Self
+    ) -> io::Result<Self>
     {
         // Safe because the Drop impl ensures that any futures based on leaf
         // will be dropped before device gets dropped.
         let sref: &'static fs::File = unsafe { mem::transmute(&device) };
         let mut leaf = VdevLeaf::new(sref).unwrap();
-        leaf.set(size, lbas_per_zone);
+        leaf.set(size, lbas_per_zone)?;
         let spacemap_space = leaf.spacemap_space();
         let inner = Arc::new(RwLock::new(Inner {
             delayed: None,
@@ -985,14 +985,14 @@ impl VdevBlock {
             _device: device
         }));
         inner.write().unwrap().weakself = Arc::downgrade(&inner);
-        VdevBlock {
+        Ok(VdevBlock {
             inner,
             size,
             spacemap_space,
             lbas_per_zone,
             uuid,
             path,
-        }
+        })
     }
 
     /// The pathname most recently used to open this device.
@@ -1206,7 +1206,8 @@ impl Manager {
                 let label: Label = lr.deserialize().unwrap();
                 assert_eq!(uuid, label.uuid);
                 let vb = VdevBlock::new(rec.file, rec.path, uuid,
-                    label.lbas, label.lbas_per_zone, label.txg);
+                    label.lbas, label.lbas_per_zone, label.txg)
+                    .map_err(Error::from)?;
                 Ok((vb, lr))
             })
     }

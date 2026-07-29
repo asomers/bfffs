@@ -22,7 +22,7 @@ use pin_project::pin_project;
 use std::{
     borrow::Borrow,
     fs,
-    io::{self, IoSlice, IoSliceMut},
+    io::{self, ErrorKind, IoSlice, IoSliceMut},
     mem::{self, MaybeUninit},
     os::{
         fd::AsFd,
@@ -148,6 +148,8 @@ pub struct VdevFile<'fd> {
     size:           LbaT,
     /// How does the underlying file deallocate data?
     erase_method:   AtomicEraseMethod,
+    /// Does the underlying device have an intrinsically fixed zone size?`
+    natively_zoned: bool
 }
 
 impl Vdev for VdevFile<'_> {
@@ -349,6 +351,7 @@ impl<'fd> VdevFile<'fd> {
         let size = Self::devlen(f, sectorsize)? / BYTES_PER_LBA as u64;
         let lbas_per_zone;
         let erase_method;
+        let natively_zoned;
 
         if let Ok(params) = f.get_params() {
             if !params.supports_report_zones() {
@@ -383,10 +386,12 @@ impl<'fd> VdevFile<'fd> {
             lbas_per_zone = first_zone.zone_length;
 
             erase_method = AtomicEraseMethod::new(EraseMethod::ResetWritePointer);
+            natively_zoned = true;
         } else {
             // Not a zoned device
             erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
             lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
+            natively_zoned = false;
         }
 
         let nzones = size.div_ceil(lbas_per_zone);
@@ -396,7 +401,8 @@ impl<'fd> VdevFile<'fd> {
             spacemap_space,
             lbas_per_zone,
             size,
-            erase_method
+            erase_method,
+            natively_zoned
         })
     }
 
@@ -493,11 +499,17 @@ impl<'fd> VdevFile<'fd> {
     /// * `lbas_per_zone`:  If specified, this many LBAs will be assigned to
     ///                     simulated zones on devices that don't have native
     ///                     zones.
-    pub fn set(&mut self, size: LbaT, lbas_per_zone: LbaT) {
+    pub fn set(&mut self, size: LbaT, lbas_per_zone: LbaT) -> io::Result<()> {
+        if self.natively_zoned && self.lbas_per_zone != lbas_per_zone {
+            let msg = "Cannot set custom lbas_per_zoned on a zoned device";
+            tracing::error!(msg);
+            return Err(io::Error::new(ErrorKind::Unsupported, msg));
+        }
+        self.lbas_per_zone = lbas_per_zone;
         self.size = size;
         let nzones = size.div_ceil(lbas_per_zone);
         self.spacemap_space = spacemap_space(nzones);
-        self.lbas_per_zone = lbas_per_zone;
+        Ok(())
     }
 
     /// Sync the `Vdev`, ensuring that all data written so far reaches stable
@@ -729,7 +741,7 @@ mock!{
         pub fn read_at(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut;
         pub fn read_spacemap(&self, buf: IoVecMut, lba: LbaT) -> BoxVdevFut;
         pub fn readv_at(&self, bufs: SGListMut, lba: LbaT) -> BoxVdevFut;
-        pub fn set(&mut self, size: LbaT, lbas_per_zone: LbaT);
+        pub fn set(&mut self, size: LbaT, lbas_per_zone: LbaT) -> Result<()>;
         pub fn spacemap_space(&self) -> LbaT;
         pub fn sync_all<'a>(&'a self) -> VdevFileFut<'a>;
         pub fn write_at(&self, buf: IoVec, lba: LbaT) -> BoxVdevFut;
