@@ -349,6 +349,7 @@ mod zoned {
     };
     use function_name::named;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
     use std::{
         fs,
         io::{self, ErrorKind},
@@ -385,7 +386,7 @@ mod zoned {
     // [ ] Fail to open an existing zoned device, if its zone size is different
     //     than how it was originally formatted.
     // [✓] erase_zone should use RWP in sequential zones
-    // [ ] erase_zone should be a NOP in conventional zones
+    // [✓] erase_zone should be a NOP in conventional zones
     // [ ] vdev_file will call finish_zone when the zone fills up
     // [ ] Fail to create a vdev_file if the spacemap cannot fit within the
     //     sequential zones.
@@ -393,40 +394,41 @@ mod zoned {
 
     /// erase_zone should use RWP on such devices
     #[named]
+    #[rstest]
+    #[case(1, ZoneType::Conventional)]
+    #[case(2, ZoneType::SeqRequired)]
     #[tokio::test]
-    async fn erase_zone() {
+    async fn erase_zone(#[case] zid: u32, #[case] zt: ZoneType) {
         require_gzoned!();
 
         let h = harness().unwrap();
 
-        let zid = 2;
-        let zl2 = h.vdev.zone_limits(zid);
+        let zl = h.vdev.zone_limits(zid);
 
         // First, write a record
         {
             let dbs = DivBufShared::from(vec![42u8; 4096]);
             let wbuf = dbs.try_const().unwrap();
-            h.vdev.write_at(wbuf.clone(), zl2.0).await.unwrap();
+            h.vdev.write_at(wbuf.clone(), zl.0).await.unwrap();
         }
 
         {
-            let mut rz = h.fd.report_zones(ReportOptions::All, zl2.0)
+            let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
                 .unwrap();
             let first = rz.next().unwrap().unwrap();
-            assert_eq!(first.zone_type, ZoneType::SeqRequired,
-                       "This test requires a sequential zone");
+            assert_eq!(first.zone_type, zt);
         }
 
         // Actually erase the zone
-        h.vdev.erase_zone(zl2.0, zl2.1 - 1).await.unwrap();
+        h.vdev.erase_zone(zl.0, zl.1 - 1).await.unwrap();
 
         // verify that it got erased.  The old data may or may not be readable,
         // depending on the zoned device's implementaiton.
         {
-            let mut rz = h.fd.report_zones(ReportOptions::All, zl2.0)
+            let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
                 .unwrap();
             let first = rz.next().unwrap().unwrap();
-            assert_eq!(first.write_pointer_lba, Some(zl2.0));
+            assert_eq!(first.write_pointer_lba, Some(zl.0));
         }
     }
 
