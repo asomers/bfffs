@@ -343,6 +343,7 @@ mod zoned {
     use divbuf::DivBufShared;
     use freebsd_zonecmd::{
         ReportOptions,
+        ZoneCondition,
         ZonedDevice,
         ZoneType,
         gzoned::{self, Gzoned}
@@ -387,7 +388,8 @@ mod zoned {
     //     than how it was originally formatted.
     // [✓] erase_zone should use RWP in sequential zones
     // [✓] erase_zone should be a NOP in conventional zones
-    // [ ] vdev_file will call finish_zone when the zone fills up
+    // [✓] vdev_file will call finish_zone when the zone fills up
+    // [ ] finish_zone will be a NOP in conventional zones.
     // [ ] Fail to create a vdev_file if the spacemap cannot fit within the
     //     sequential zones.
     // [✓] The set method should be unable to change zone count
@@ -429,6 +431,46 @@ mod zoned {
                 .unwrap();
             let first = rz.next().unwrap().unwrap();
             assert_eq!(first.write_pointer_lba, Some(zl.0));
+        }
+    }
+
+    /// finish_zone should use FinishZone on zoned devices
+    #[named]
+    #[rstest]
+    #[case(1, ZoneType::Conventional)]
+    #[case(2, ZoneType::SeqRequired)]
+    #[tokio::test]
+    async fn finish_zone(#[case] zid: u32, #[case] zt: ZoneType) {
+        require_gzoned!();
+
+        let h = harness().unwrap();
+
+        let zl = h.vdev.zone_limits(zid);
+
+        // First, write a record
+        {
+            let dbs = DivBufShared::from(vec![42u8; 4096]);
+            let wbuf = dbs.try_const().unwrap();
+            h.vdev.write_at(wbuf.clone(), zl.0).await.unwrap();
+        }
+
+        {
+            let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
+                .unwrap();
+            let first = rz.next().unwrap().unwrap();
+            assert_eq!(first.zone_type, zt);
+            dbg!(&first);
+        }
+
+        // Now finish the zone
+        h.vdev.finish_zone(zl.0).await.unwrap();
+
+        // verify that it got finished.
+        {
+            let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
+                .unwrap();
+            let first = rz.next().unwrap().unwrap();
+            assert_eq!(first.zone_condition, ZoneCondition::Full);
         }
     }
 

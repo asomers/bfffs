@@ -70,6 +70,15 @@ impl AtomicEraseMethod {
     }
 }
 
+/// How does this device want to be informed that zones are finished?
+#[derive(Clone, Copy, Debug)]
+enum FinishMethod {
+    /// Most devices don't care
+    None,
+    /// SMR devices have a dedicated FinishZone command
+    FinishZone,
+}
+
 /// FFI definitions that don't belong in libc.  The ioctls can't go in libc
 /// because they use Nix's macros.  The structs probably shouldn't go in libc,
 /// because they're not really intended to be a stable interface.
@@ -148,6 +157,8 @@ pub struct VdevFile<'fd> {
     size:           LbaT,
     /// How does the underlying file deallocate data?
     erase_method:   AtomicEraseMethod,
+    /// How does the underlying device finish a zone?
+    finish_method:  FinishMethod,
     /// Does the underlying device have an intrinsically fixed zone size?`
     natively_zoned: bool
 }
@@ -295,9 +306,21 @@ impl<'fd> VdevFile<'fd> {
     /// # Parameters
     ///
     /// -`lba`: The first LBA of the zone to finish
-    pub fn finish_zone(&self, _lba: LbaT) -> BoxVdevFut {
-        // ordinary files don't have Zone operations
-        Box::pin(future::ok(()))
+    pub fn finish_zone(&self, lba: LbaT) -> BoxVdevFut {
+        match self.finish_method {
+            FinishMethod::None => {
+                // ordinary files don't have Zone operations
+                Box::pin(future::ok(()))
+            },
+            _ => {
+                let fd = self.fd.as_raw_fd();
+                let t = task::spawn_blocking(move || {
+                    fd.finish_zone(lba, false)
+                }).map(std::result::Result::unwrap)
+                .map_err(Error::from);
+                Box::pin(t)
+            }
+        }
     }
 
     pub fn lbas_per_zone(&self) -> LbaT{
@@ -352,6 +375,7 @@ impl<'fd> VdevFile<'fd> {
         let lbas_per_zone;
         let erase_method;
         let natively_zoned;
+        let finish_method;
 
         if let Ok(params) = f.get_params() {
             if !params.supports_report_zones() {
@@ -387,11 +411,13 @@ impl<'fd> VdevFile<'fd> {
 
             erase_method = AtomicEraseMethod::new(EraseMethod::ResetWritePointer);
             natively_zoned = true;
+            finish_method = FinishMethod::FinishZone;
         } else {
             // Not a zoned device
             erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
             lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
             natively_zoned = false;
+            finish_method = FinishMethod::None;
         }
 
         let nzones = size.div_ceil(lbas_per_zone);
@@ -402,6 +428,7 @@ impl<'fd> VdevFile<'fd> {
             lbas_per_zone,
             size,
             erase_method,
+            finish_method,
             natively_zoned
         })
     }
