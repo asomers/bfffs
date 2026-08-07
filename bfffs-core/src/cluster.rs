@@ -909,6 +909,10 @@ impl Cluster {
     {
         let total_zones = vdev.zones();
         let fsm = FreeSpaceMap::new(total_zones);
+        // TODO: RWP for all zones.  Or, arguably, we should RWP just before
+        // opening a zone, rather than when reaping a dead zone.  That would
+        // make it easier to rollback to older TXGs when opening, and it would
+        // reduce the danger of accidentally formatting the wrong disk.
         Cluster::new((fsm, vdev))
     }
 
@@ -1034,6 +1038,12 @@ impl Cluster {
     /// construct other vdevs stacked on top.
     pub async fn open(vdev_raid: RaidImpl) -> Result<Self>
     {
+        // TODO: Issue a REPORT ZONES and ensure that the returned write
+        // pointers match what's stored in the FreeSpaceMap.
+        // If a WP has advanced, that probably means there was an unclean
+        // dismount.  We should compensate by wasting space to advance our own
+        // WP.  But if a WP has rolled back, that is worse.  It could indicate
+        // corruption.
         FreeSpaceMap::open(vdev_raid).await
             .map(Cluster::new)
     }
