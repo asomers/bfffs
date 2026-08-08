@@ -150,6 +150,9 @@ pub type VdevFileFut<'a> =
 #[derive(Debug)]
 pub struct VdevFile<'fd> {
     fd:             BorrowedFd<'fd>,
+    /// Starting LBA for the first non-conventional zone.  Don't Care for
+    /// devices that aren't zoned.
+    conv_zone_cutoff: LbaT,
     /// Number of reserved LBAS in first zone for each spacemap
     spacemap_space: LbaT,
     /// Number of LBAs per simulated zone
@@ -286,14 +289,19 @@ impl<'fd> VdevFile<'fd> {
                 Box::pin(t)
             },
             EraseMethod::ResetWritePointer => {
-                // This works because we require zoned devices to have equally
-                // sized zones.
-                let fd = self.fd.as_raw_fd();
-                let t = task::spawn_blocking(move || {
-                    fd.reset_write_pointer(start, false)
-                }).map(std::result::Result::unwrap)
-                .map_err(Error::from);
-                Box::pin(t)
+                if start < self.conv_zone_cutoff {
+                    // Nothing to do for conventional zones
+                    Box::pin(future::ok(()))
+                } else {
+                    // This works because we require zoned devices to have
+                    // equally sized zones.
+                    let fd = self.fd.as_raw_fd();
+                    let t = task::spawn_blocking(move || {
+                        fd.reset_write_pointer(start, false)
+                    }).map(std::result::Result::unwrap)
+                    .map_err(Error::from);
+                    Box::pin(t)
+                }
             }
         }
     }
@@ -305,20 +313,25 @@ impl<'fd> VdevFile<'fd> {
     ///
     /// # Parameters
     ///
-    /// -`lba`: The first LBA of the zone to finish
-    pub fn finish_zone(&self, lba: LbaT) -> BoxVdevFut {
+    /// -`start`: The first start of the zone to finish
+    pub fn finish_zone(&self, start: LbaT) -> BoxVdevFut {
         match self.finish_method {
             FinishMethod::None => {
                 // ordinary files don't have Zone operations
                 Box::pin(future::ok(()))
             },
-            _ => {
-                let fd = self.fd.as_raw_fd();
-                let t = task::spawn_blocking(move || {
-                    fd.finish_zone(lba, false)
-                }).map(std::result::Result::unwrap)
-                .map_err(Error::from);
-                Box::pin(t)
+            FinishMethod::FinishZone => {
+                if start < self.conv_zone_cutoff {
+                    // Nothing to do for conventional zones
+                    Box::pin(future::ok(()))
+                } else {
+                    let fd = self.fd.as_raw_fd();
+                    let t = task::spawn_blocking(move || {
+                        fd.finish_zone(start, false)
+                    }).map(std::result::Result::unwrap)
+                    .map_err(Error::from);
+                    Box::pin(t)
+                }
             }
         }
     }
@@ -376,6 +389,7 @@ impl<'fd> VdevFile<'fd> {
         let erase_method;
         let natively_zoned;
         let finish_method;
+        let conv_zone_cutoff;
 
         if let Ok(params) = f.get_params() {
             if !params.supports_report_zones() {
@@ -390,7 +404,8 @@ impl<'fd> VdevFile<'fd> {
                 tracing::info!("Zoned device does not support DISK_ZONE_RWP.");
                 return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
             }
-            let mut rz = f.report_zones(ReportOptions::All, 0)?;
+            // TODO: factor out this loop into a unit-testable function.
+            let rz = f.report_zones(ReportOptions::All, 0)?;
             match rz.header().same {
                 ZoneSame::AllDifferent => {
                     tracing::info!("Zoned device has differently-sized zones.");
@@ -402,18 +417,55 @@ impl<'fd> VdevFile<'fd> {
                 },
                 _ => ()
             };
-            let first_zone = rz.next().ok_or(io::Error::from_raw_os_error(libc::EOPNOTSUPP)).flatten()?;
-            if first_zone.zone_type != ZoneType::Conventional {
-                tracing::info!("Zoned device has non-conventional first zone");
+            let mut cutoff = None;
+            let mut lpz = None;
+            let mut last_zone_sequential = None;
+            for zs in rz {
+                let zs = zs.or(Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP)))?;
+                if let Some(lpz) = lpz {
+                    if lpz != zs.zone_length {
+                        tracing::warn!("BFFFS does not yet support zoned devices with unequal zone lengths");
+                        return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+                    }
+                }
+
+                lpz = Some(zs.zone_length);
+                match last_zone_sequential {
+                    None if zs.zone_type != ZoneType::Conventional => {
+                        tracing::info!("Zoned device has non-conventional first zone");
+                        return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+                    },
+                    None => {
+                        last_zone_sequential = Some(false);
+                    },
+                    Some(false) if zs.zone_type != ZoneType::Conventional => {
+                        cutoff = Some(zs.zone_start_lba);
+                        last_zone_sequential = Some(true);
+                    },
+                    Some(true) if zs.zone_type == ZoneType::Conventional => {
+                        // A conventional zone after a sequential zone?  This
+                        // HDD is unusual.  BFFFS needs more complicated code to
+                        // support it.
+                        tracing::warn!("BFFFS does not yet support zoned devices with conventional zones after sequential zones.");
+                        return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+                    },
+                    _ => ()
+                }
+            }
+            if lpz.is_none() {
+                tracing::info!("Zoned device doesn't have any zones!?");
                 return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
             }
-            lbas_per_zone = first_zone.zone_length;
+            
+            lbas_per_zone = lpz.unwrap();
+            conv_zone_cutoff = cutoff.unwrap();
 
             erase_method = AtomicEraseMethod::new(EraseMethod::ResetWritePointer);
             natively_zoned = true;
             finish_method = FinishMethod::FinishZone;
         } else {
             // Not a zoned device
+            conv_zone_cutoff = 0;
             erase_method = AtomicEraseMethod::initial(f.as_raw_fd())?;
             lbas_per_zone = VdevFile::DEFAULT_LBAS_PER_ZONE;
             natively_zoned = false;
@@ -424,6 +476,7 @@ impl<'fd> VdevFile<'fd> {
         let spacemap_space = spacemap_space(nzones);
         Ok(VdevFile {
             fd: f.as_fd(),
+            conv_zone_cutoff,
             spacemap_space,
             lbas_per_zone,
             size,

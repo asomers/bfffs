@@ -407,13 +407,7 @@ mod zoned {
 
         let zl = h.vdev.zone_limits(zid);
 
-        // First, write a record
-        {
-            let dbs = DivBufShared::from(vec![42u8; 4096]);
-            let wbuf = dbs.try_const().unwrap();
-            h.vdev.write_at(wbuf.clone(), zl.0).await.unwrap();
-        }
-
+        // Verify that the zone type is what we expect
         {
             let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
                 .unwrap();
@@ -421,12 +415,19 @@ mod zoned {
             assert_eq!(first.zone_type, zt);
         }
 
-        // Actually erase the zone
+        // Then, write a record
+        {
+            let dbs = DivBufShared::from(vec![42u8; 4096]);
+            let wbuf = dbs.try_const().unwrap();
+            h.vdev.write_at(wbuf.clone(), zl.0).await.unwrap();
+        }
+
+        // Finally, actually erase the zone
         h.vdev.erase_zone(zl.0, zl.1 - 1).await.unwrap();
 
         // verify that it got erased.  The old data may or may not be readable,
         // depending on the zoned device's implementaiton.
-        {
+        if zt == ZoneType::SeqRequired {
             let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
                 .unwrap();
             let first = rz.next().unwrap().unwrap();
@@ -447,26 +448,26 @@ mod zoned {
 
         let zl = h.vdev.zone_limits(zid);
 
-        // First, write a record
+        // First, verify the zone type is what we wanted
+        {
+            let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
+                .unwrap();
+            let first = rz.next().unwrap().unwrap();
+            assert_eq!(first.zone_type, zt);
+        }
+
+        // Then, write a record
         {
             let dbs = DivBufShared::from(vec![42u8; 4096]);
             let wbuf = dbs.try_const().unwrap();
             h.vdev.write_at(wbuf.clone(), zl.0).await.unwrap();
         }
 
-        {
-            let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
-                .unwrap();
-            let first = rz.next().unwrap().unwrap();
-            assert_eq!(first.zone_type, zt);
-            dbg!(&first);
-        }
-
         // Now finish the zone
         h.vdev.finish_zone(zl.0).await.unwrap();
 
         // verify that it got finished.
-        {
+        if zt == ZoneType::SeqRequired {
             let mut rz = h.fd.report_zones(ReportOptions::All, zl.0)
                 .unwrap();
             let first = rz.next().unwrap().unwrap();
